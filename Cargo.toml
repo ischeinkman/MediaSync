@@ -1,0 +1,12 @@
+[package]
+name = "vlcsync"
+version = "0.1.0"
+authors = ["ischeinkman <scheinkman.ilan@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+igd = "0.9.1"
+rand = "0.7"
+mpris = "2.0.0-rc1"
