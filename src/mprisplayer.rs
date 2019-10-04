@@ -1,13 +1,14 @@
 use crate::{DebugError, MyResult};
 use mpris;
-use std::convert::TryInto;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration};
 
 use crate::{MediaPlayer, ProtocolMessage};
 
 pub struct MprisPlayer<'a> {
-    player: mpris::Player<'a>,
-    previous_status: Option<PlayerStatus>,
+    name: String,
+    player: Arc<Mutex<mpris::Player<'a>>>,
+    previous_status: Arc<Mutex<Option<PlayerStatus>>>,
 }
 
 pub struct PlayerStatus {
@@ -26,32 +27,28 @@ impl<'a> MprisPlayer<'a> {
             return Ok(None);
         };
         let retvl = MprisPlayer {
-            player: found,
-            previous_status: None,
+            name: found.identity().to_owned(),
+            player: Arc::new(Mutex::new(found)),
+            previous_status: Arc::new(Mutex::new(None)),
         };
         Ok(Some(retvl))
     }
     fn current_trackid(&self) -> MyResult<Option<mpris::TrackID>> {
-        self.player
+        let player = self.player.lock().map_err(DebugError::into_myerror)?;
+        player
             .get_metadata()
             .map_err(|e| format!("mpris::MetadataError: {:?}", e).into())
-            .map(|m| {
-                m.track_id()
-            })
+            .map(|m| m.track_id())
     }
     fn current_status(&self) -> MyResult<PlayerStatus> {
-        let is_paused = self
-            .player
+        let player = self.player.lock().map_err(DebugError::into_myerror)?;
+        let is_paused = player
             .get_playback_status()
             .map_err(DebugError::into_myerror)?
             == mpris::PlaybackStatus::Paused;
         let track = self.current_trackid()?;
-        let position = self
-            .player
-            .get_position()
-            .map_err(DebugError::into_myerror)?;
-        let track_url: Option<String> = self
-            .player
+        let position = player.get_position().map_err(DebugError::into_myerror)?;
+        let track_url: Option<String> = player
             .get_metadata()
             .map_err(|e| {
                 Box::<dyn std::error::Error>::from(format!("mpris::MetadataError: {:?}", e))
@@ -77,7 +74,8 @@ impl<'a> MprisPlayer<'a> {
             retvl.push(ProtocolMessage::TimePing(current_status.position));
         }
 
-        if let Some(prev) = self.previous_status.as_ref() {
+        let mut status_lock = self.previous_status.lock().map_err(DebugError::into_myerror)?;
+        if let Some(prev) = status_lock.as_ref() {
             let time_delta = current_status.position.checked_sub(prev.position);
             let should_jump = time_delta
                 .filter(|&t| t <= (interval * 101) / 100)
@@ -102,28 +100,47 @@ impl<'a> MprisPlayer<'a> {
             }
         }
 
-        self.previous_status = Some(current_status);
+        *status_lock = Some(current_status);
         Ok(retvl)
+    }
+
+    pub fn handle(&self) -> MprisPlayer<'a> {
+        MprisPlayer {
+            name : self.name.clone(), 
+            player : Arc::clone(&self.player),
+            previous_status : Arc::clone(&self.previous_status),
+        }
     }
 }
 impl<'a> MediaPlayer for MprisPlayer<'a> {
+    fn name(&self) -> &str {
+        &self.name
+    }
     fn on_message(&mut self, msg: ProtocolMessage) -> MyResult<()> {
+        let player = self.player.lock().map_err(DebugError::into_myerror)?;
         match msg {
             ProtocolMessage::Jump(time) => {
-                self.player
-                    .set_position(self.current_trackid()?.ok_or_else(|| "Tried jumping without TrackID!".to_owned())?, &time)
+                player
+                    .set_position(
+                        self.current_trackid()?
+                            .ok_or_else(|| "Tried jumping without TrackID!".to_owned())?,
+                        &time,
+                    )
                     .map_err(DebugError::into_myerror)?;
             }
             ProtocolMessage::Pause(time) => {
-                self.player
-                    .set_position(self.current_trackid()?.ok_or_else(|| "Tried Pausing without TrackID!".to_owned())?, &time)
+                player
+                    .set_position(
+                        self.current_trackid()?
+                            .ok_or_else(|| "Tried Pausing without TrackID!".to_owned())?,
+                        &time,
+                    )
                     .map_err(DebugError::into_myerror)?;
-                self.player.pause().map_err(DebugError::into_myerror)?;
+                player.pause().map_err(DebugError::into_myerror)?;
             }
             ProtocolMessage::Play(time) => {
                 if mpris::PlaybackStatus::Playing
-                    == self
-                        .player
+                    == player
                         .get_playback_status()
                         .map_err(DebugError::into_myerror)?
                 {
@@ -131,24 +148,29 @@ impl<'a> MediaPlayer for MprisPlayer<'a> {
                         .to_owned()
                         .into());
                 }
-                self.player
-                    .set_position(self.current_trackid()?.ok_or_else(|| "Tried Unpausing without TrackID!".to_owned())?, &time)
+                player
+                    .set_position(
+                        self.current_trackid()?
+                            .ok_or_else(|| "Tried Unpausing without TrackID!".to_owned())?,
+                        &time,
+                    )
                     .map_err(DebugError::into_myerror)?;
-                self.player.play().map_err(DebugError::into_myerror)?;
+                player.play().map_err(DebugError::into_myerror)?;
             }
             ProtocolMessage::TimePing(time) => {
                 const ERROR_MARGIN: Duration = Duration::from_millis(20);
-                let current_time = self
-                    .player
-                    .get_position()
-                    .map_err(DebugError::into_myerror)?;
+                let current_time = player.get_position().map_err(DebugError::into_myerror)?;
                 let difference = current_time
                     .checked_sub(time)
                     .or_else(|| time.checked_sub(current_time))
                     .unwrap_or(Duration::from_secs(0));
                 if difference > ERROR_MARGIN {
-                    self.player
-                        .set_position(self.current_trackid()?.ok_or_else(|| "Tried ponging without TrackID!".to_owned())?, &time)
+                    player
+                        .set_position(
+                            self.current_trackid()?
+                                .ok_or_else(|| "Tried ponging without TrackID!".to_owned())?,
+                            &time,
+                        )
                         .map_err(DebugError::into_myerror)?;
                 }
             }
@@ -169,3 +191,5 @@ impl DebugError for mpris::FindingError {
         format!("mpris::FindingError : {:?}", self)
     }
 }
+
+unsafe impl<'a> Send for MprisPlayer<'a> {}

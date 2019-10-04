@@ -1,17 +1,107 @@
-#![allow(unused)]
-
 use crate::MyResult;
+use crate::{DebugError, ProtocolMessage};
 use igd;
 use rand;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use crate::ProtocolMessage;
+pub fn decode_ipv4(digits: [char; 6]) -> u32 {
+    let mut retvl = 0;
+    for (idx, &c) in digits.iter().enumerate() {
+        let power = 2 - (idx as u32);
+        let scaled = 62u32.pow(power);
+        let coeff = if c >= '0' && c <= '9' {
+            c as u32 - '0' as u32
+        } else if c >= 'a' && c <= 'z' {
+            c as u32 - 'a' as u32 + 10
+        } else if c >= 'A' && c <= 'Z' {
+            c as u32 - 'A' as u32 + 36
+        } else {
+            0
+        };
+        retvl += coeff * scaled;
+    }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+    retvl
+}
+
+pub fn decode_port(digits: [char; 3]) -> u16 {
+    let mut retvl = 0u16;
+    for (idx, &c) in digits.iter().enumerate() {
+        let power = 2 - (idx as u32);
+        let scaled = 62u16.pow(power);
+        let coeff = if c >= '0' && c <= '9' {
+            c as u16 - '0' as u16
+        } else if c >= 'a' && c <= 'z' {
+            c as u16 - 'a' as u16 + 10
+        } else if c >= 'A' && c <= 'Z' {
+            c as u16 - 'A' as u16 + 36
+        } else {
+            0
+        };
+        retvl += coeff * scaled;
+    }
+    retvl
+}
+
+pub fn encode_port(port: u16) -> [char; 3] {
+    let mut retvl = ['\0'; 3];
+    let mut left = u32::from(port);
+    let mut cur_idx = 2;
+    while left > 0 {
+        let digit = left % 62;
+        let digit_char = if digit < 10 {
+            std::char::from_digit(digit, 10).unwrap()
+        } else if digit < 36 {
+            let offset = digit - 10 + u32::from('a');
+            std::char::from_u32(offset).unwrap()
+        } else {
+            let offset = digit - 36 + u32::from('A');
+            std::char::from_u32(offset).unwrap()
+        };
+        retvl[cur_idx] = digit_char;
+        if left < 62 {
+            break;
+        }
+        cur_idx -= 1;
+        left /= 62;
+    }
+
+    retvl
+}
+
+pub fn encode_ipv4(ip: u32) -> [char; 6] {
+    let mut retvl = ['\0'; 6];
+    let mut left = ip;
+    let mut cur_idx = 5;
+    while left > 0 {
+        let digit = left % 62;
+        let digit_char = if digit < 10 {
+            std::char::from_digit(digit, 10).unwrap()
+        } else if digit < 36 {
+            let offset = digit - 10 + u32::from('a');
+            std::char::from_u32(offset).unwrap()
+        } else {
+            let offset = digit - 36 + u32::from('A');
+            std::char::from_u32(offset).unwrap()
+        };
+        retvl[cur_idx] = digit_char;
+        if left < 62 {
+            break;
+        }
+        left /= 62;
+        cur_idx -= 1;
+    }
+
+    retvl
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
 pub struct RawBlock {
     data: [u8; 32],
 }
@@ -113,116 +203,186 @@ pub enum MessageBlock {
 
 impl MessageBlock {
     pub fn into_raw(self) -> RawBlock {
-        unimplemented!()
+        //TODO: this
+        RawBlock::default()
     }
 }
 
 pub struct CommunicationThread {
-    thread: thread::JoinHandle<()>,
+    thread: Arc<thread::JoinHandle<()>>,
     pub sender: mpsc::Sender<ProtocolMessage>,
-    pub recv: mpsc::Receiver<ProtocolMessage>,
+    pub recv: Arc<Mutex<mpsc::Receiver<ProtocolMessage>>>,
 }
 impl CommunicationThread {
-    pub fn start(mut stream: TcpStream) -> MyResult<Self> {
+    pub fn start(
+        listener: Arc<RwLock<TcpListener>>,
+        server_addrs: Arc<RwLock<Vec<SocketAddr>>>,
+        client_streams: Arc<RwLock<Vec<TcpStream>>>,
+        server_streams: Arc<RwLock<Vec<TcpStream>>>,
+    ) -> MyResult<Self> {
         let (sender, recv) = mpsc::channel::<ProtocolMessage>();
         let (thread_sender, thread_recv) = mpsc::channel::<ProtocolMessage>();
-        stream.set_nonblocking(true)?;
         let handle = thread::spawn(move || {
-            let _unused = thread_runner(stream, sender, thread_recv);
+            let _unused = thread_runner(
+                listener,
+                server_addrs,
+                client_streams,
+                server_streams,
+                sender,
+                thread_recv,
+            );
         });
         Ok(Self {
             sender: thread_sender,
-            recv,
-            thread: handle,
+            recv: Arc::new(Mutex::new(recv)),
+            thread: Arc::new(handle),
         })
+    }
+
+    pub fn handle(&self) -> CommunicationThread {
+        CommunicationThread {
+            thread: Arc::clone(&self.thread),
+            sender: self.sender.clone(),
+            recv: Arc::clone(&self.recv),
+        }
     }
 }
 
 impl Drop for CommunicationThread {
     fn drop(&mut self) {
-        self.sender.send(ProtocolMessage::Shutdown);
+        //Ignore the error, since we are just trying to shut down the thread anyway
+        self.sender.send(ProtocolMessage::Shutdown).unwrap_or_default();
     }
 }
-
-fn thread_runner(
-    mut stream: TcpStream,
-    mut local_sender: mpsc::Sender<ProtocolMessage>,
-    mut thread_recv: mpsc::Receiver<ProtocolMessage>,
+fn process_stream(
+    stream: &mut TcpStream,
+    local_sender: &mpsc::Sender<ProtocolMessage>,
+    track_change_buffers: &mut HashMap<SocketAddr, (String, u32)>,
+    command_buffers: &mut HashMap<SocketAddr, ([u8; 32], usize)>,
 ) -> MyResult<()> {
+    let buffer_key = stream.peer_addr()?;
+
+    let (ref mut cur_buffer, ref mut cur_bytes_read) =
+        command_buffers.entry(buffer_key).or_insert(([0; 32], 0));
+    let (ref mut track_change_buffer, ref mut track_change_chars_left) = track_change_buffers
+        .entry(buffer_key)
+        .or_insert((String::new(), 0));
+
+    let cur_slice = &mut cur_buffer[*cur_bytes_read..32 - *cur_bytes_read];
+    let batch_read = match stream.read(cur_slice) {
+        Ok(n) => n,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                0
+            } else {
+                return Err(e.into());
+            }
+        }
+    };
+    *cur_bytes_read += batch_read;
+    if *cur_bytes_read > 32 {
+        return Err(format!(
+            "Error: somehow overflowed our remove message buffer to size {}",
+            cur_bytes_read
+        )
+        .into());
+    } else if *cur_bytes_read == 32 {
+        let message = RawBlock::from_data(*cur_buffer).parse()?;
+
+        match message {
+            MessageBlock::TimedCommand { kind, nanoseconds } => {
+                let tm = Duration::from_nanos(nanoseconds);
+                let command_to_send = match kind {
+                    TimedCommandKind::Play => ProtocolMessage::Play(tm),
+                    TimedCommandKind::Pause => ProtocolMessage::Pause(tm),
+                    TimedCommandKind::Jump => ProtocolMessage::Jump(tm),
+                    TimedCommandKind::Ping => ProtocolMessage::TimePing(tm),
+                };
+                local_sender.send(command_to_send)?;
+            }
+            MessageBlock::TrackChangeHeader {
+                path_length,
+                payload,
+            } => {
+                track_change_buffer.clear();
+                *track_change_chars_left = path_length;
+                let num_payload_chars = 13.min(*track_change_chars_left);
+                let payload_raw = &payload[0..num_payload_chars as usize];
+                let payload_parsed = String::from_utf16(&payload_raw)?;
+                track_change_buffer.push_str(&payload_parsed);
+                *track_change_chars_left -= num_payload_chars;
+                if *track_change_chars_left == 0 {
+                    let mut path = String::new();
+                    std::mem::swap(&mut path, track_change_buffer);
+                    local_sender.send(ProtocolMessage::MediaChange(path))?;
+                }
+            }
+            MessageBlock::TrackChangePacket {
+                packet_idx: _packet_idx,
+                payload,
+            } => {
+                //TODO: verify packet index to buffer length
+                let num_payload_chars = 13.min(*track_change_chars_left);
+                let payload_raw = &payload[0..num_payload_chars as usize];
+                let payload_parsed = String::from_utf16(&payload_raw)?;
+                track_change_buffer.push_str(&payload_parsed);
+                *track_change_chars_left -= num_payload_chars;
+                if *track_change_chars_left == 0 {
+                    let mut path = String::new();
+                    std::mem::swap(&mut path, track_change_buffer);
+                    local_sender.send(ProtocolMessage::MediaChange(path))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+fn check_incoming(
+    listener: &RwLock<TcpListener>,
+    server_streams: &RwLock<Vec<TcpStream>>,
+    server_addrs: &RwLock<Vec<SocketAddr>>,
+) -> MyResult<()> {
+    let listener = listener.write().map_err(DebugError::into_myerror)?;
+
+    let (stream, _) = match listener.accept() {
+        Ok((s, a)) => (s, a),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(());
+            } else {
+                return Err(e.into());
+            }
+        }
+    };
+    stream.set_nonblocking(true)?;
+    let mut server_lock = server_streams.write().map_err(DebugError::into_myerror)?;
+    let mut addr_lock = server_addrs.write().map_err(DebugError::into_myerror)?;
+    addr_lock.push(stream.peer_addr()?);
+    server_lock.push(stream);
+    Ok(())
+}
+fn thread_runner(
+    listener: Arc<RwLock<TcpListener>>,
+    server_addrs: Arc<RwLock<Vec<SocketAddr>>>,
+    client_streams: Arc<RwLock<Vec<TcpStream>>>,
+    server_streams: Arc<RwLock<Vec<TcpStream>>>,
+    local_sender: mpsc::Sender<ProtocolMessage>,
+    thread_recv: mpsc::Receiver<ProtocolMessage>,
+) -> MyResult<()> {
+    let mut track_change_buffers: HashMap<SocketAddr, (String, u32)> = HashMap::new();
+    let mut command_buffers: HashMap<SocketAddr, ([u8; 32], usize)> = HashMap::new();
     loop {
-        // First check for any impending messages
-        let mut track_change_buffer = String::new();
-        let mut track_change_chars_left = 0;
-
-        let mut cur_buffer = [0; 32];
-        let mut cur_bytes_read = 0;
-        let cur_slice = &mut cur_buffer[cur_bytes_read..32 - cur_bytes_read];
-        let batch_read = match stream.read(cur_slice) {
-            Ok(n) => n,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    0
-                } else {
-                    return Err(e.into());
-                }
-            }
-        };
-        cur_bytes_read += batch_read;
-        if cur_bytes_read > 32 {
-            return Err(format!(
-                "Error: somehow overflowed our remove message buffer to size {}",
-                cur_bytes_read
-            )
-            .into());
-        } else if cur_bytes_read == 32 {
-            let message = RawBlock::from_data(cur_buffer).parse()?;
-
-            match message {
-                MessageBlock::TimedCommand { kind, nanoseconds } => {
-                    let tm = Duration::from_nanos(nanoseconds);
-                    let command_to_send = match kind {
-                        TimedCommandKind::Play => ProtocolMessage::Play(tm),
-                        TimedCommandKind::Pause => ProtocolMessage::Pause(tm),
-                        TimedCommandKind::Jump => ProtocolMessage::Jump(tm),
-                        TimedCommandKind::Ping => ProtocolMessage::TimePing(tm),
-                    };
-                    local_sender.send(command_to_send)?;
-                }
-                MessageBlock::TrackChangeHeader {
-                    path_length,
-                    payload,
-                } => {
-                    track_change_buffer.clear();
-                    track_change_chars_left = path_length;
-                    let num_payload_chars = 13.min(track_change_chars_left);
-                    let payload_raw = &payload[0..num_payload_chars as usize];
-                    let payload_parsed = String::from_utf16(&payload_raw)?;
-                    track_change_buffer.push_str(&payload_parsed);
-                    track_change_chars_left -= num_payload_chars;
-                    if track_change_chars_left == 0 {
-                        let mut path = String::new();
-                        std::mem::swap(&mut path, &mut track_change_buffer);
-                        local_sender.send(ProtocolMessage::MediaChange(path));
-                    }
-                }
-                MessageBlock::TrackChangePacket {
-                    packet_idx,
-                    payload,
-                } => {
-                    //TODO: verify packet index to buffer length
-                    let num_payload_chars = 13.min(track_change_chars_left);
-                    let payload_raw = &payload[0..num_payload_chars as usize];
-                    let payload_parsed = String::from_utf16(&payload_raw)?;
-                    track_change_buffer.push_str(&payload_parsed);
-                    track_change_chars_left -= num_payload_chars;
-                    if track_change_chars_left == 0 {
-                        let mut path = String::new();
-                        std::mem::swap(&mut path, &mut track_change_buffer);
-                        local_sender.send(ProtocolMessage::MediaChange(path));
-                    }
-                }
-                _ => {}
-            }
+        check_incoming(&listener, &server_streams, &server_addrs)?;
+        let mut client_lock = client_streams.write().map_err(DebugError::into_myerror)?;
+        let mut server_lock = server_streams.write().map_err(DebugError::into_myerror)?;
+        // First check for any impending messages from remote hosts
+        for stream in client_lock.iter_mut().chain(server_lock.iter_mut()) {
+            process_stream(
+                stream,
+                &local_sender,
+                &mut track_change_buffers,
+                &mut command_buffers,
+            )?;
         }
 
         // Next respond to local messages if we have any
@@ -265,7 +425,9 @@ fn thread_runner(
             _ => None,
         };
         if let Some(block) = data_to_send {
-            let bytes_written = stream.write(&block.data)?;
+            for stream in client_lock.iter_mut().chain(server_lock.iter_mut()) {
+                stream.write_all(&block.data)?;
+            }
         }
         thread::yield_now();
     }
@@ -274,81 +436,122 @@ fn thread_runner(
 }
 
 pub struct Communicator {
-    listener: TcpListener,
-    public_ip: SocketAddrV4,
-    threads: Vec<CommunicationThread>,
+    pub listener: Arc<RwLock<TcpListener>>,
+    pub public_ip: SocketAddrV4,
+    pub client_addrs: Arc<RwLock<Vec<SocketAddr>>>,
+    pub server_addrs: Arc<RwLock<Vec<SocketAddr>>>,
+    pub client_streams: Arc<RwLock<Vec<TcpStream>>>,
+    pub server_streams: Arc<RwLock<Vec<TcpStream>>>,
+    pub communication_thread: Option<CommunicationThread>,
 }
 
 impl Communicator {
     pub fn open(min_port: u16, max_port: u16) -> MyResult<Self> {
         let listener = open_port(min_port, max_port)?;
         let local_ip = match listener.local_addr()? {
-            SocketAddr::V4(s) => s, 
+            SocketAddr::V4(s) => s,
             SocketAddr::V6(s) => {
-                return Err(format!("Error: currently do not work with IPv6, but found IP {:?}", s).into());
+                return Err(format!(
+                    "Error: currently do not work with IPv6, but found IP {:?}",
+                    s
+                )
+                .into());
             }
-
         };
         let public_ip = map_igd(local_ip)?;
-        Ok(Communicator {
-            listener, 
-            public_ip, 
-            threads : Vec::new(),
-        })
-    }
-
-    pub fn check_incoming(&mut self) -> MyResult<()> {
-        let (mut stream, _) = match self.listener.accept() {
-            Ok((s, a)) => (s, a), 
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    return Ok(())
-                }
-                else {
-                    return Err(e.into());
-                }
-            }
+        let mut retvl = Communicator {
+            listener: Arc::new(RwLock::new(listener)),
+            public_ip,
+            client_addrs: Arc::new(RwLock::new(Vec::new())),
+            server_addrs: Arc::new(RwLock::new(Vec::new())),
+            client_streams: Arc::new(RwLock::new(Vec::new())),
+            server_streams: Arc::new(RwLock::new(Vec::new())),
+            communication_thread: None,
         };
-        let new_thread = CommunicationThread::start(stream)?;
-        self.threads.push(new_thread);
-        Ok(())
-    }
-
-    pub fn send_message(&mut self, msg : ProtocolMessage) -> MyResult<()> {
-        for thread in self.threads.iter_mut() {
-            thread.sender.send(msg.clone())?;
-        }
-        Ok(())
-    }
-
-    pub fn check_message(&mut self) -> MyResult<Vec<ProtocolMessage>> {
-        let mut retvl = Vec::new();
-        for thread in self.threads.iter_mut() {
-            loop {
-                match thread.recv.try_recv() {
-                    Ok(evt) => {
-                        retvl.push(evt);
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {
-                        break;
-                    }
-                    Err(e) => {
-                        return Err(e.into());
-                    }
-                }
-            }
-        }
-
+        retvl.start_background()?;
         Ok(retvl)
+    }
+
+    pub fn handle(&self) -> Communicator {
+        Communicator {
+            listener: Arc::clone(&self.listener),
+            public_ip: self.public_ip,
+            client_addrs: Arc::clone(&self.client_addrs),
+            server_addrs: Arc::clone(&self.server_addrs),
+            client_streams: Arc::clone(&self.client_streams),
+            server_streams: Arc::clone(&self.server_streams),
+            communication_thread: self.communication_thread.as_ref().map(|t| t.handle()),
+        }
+    }
+
+    pub fn send_message(&self, msg: ProtocolMessage) -> MyResult<()> {
+        if let Some(thread) = self.communication_thread.as_ref() {
+            thread.sender.send(msg.clone())?;
+            Ok(())
+        } else {
+            Err(
+                "Error: tried sending message to non-existant background thread!"
+                    .to_owned()
+                    .into(),
+            )
+        }
+    }
+
+    pub fn check_message(&self) -> MyResult<Vec<ProtocolMessage>> {
+        if let Some(thread) = self.communication_thread.as_ref() {
+            let lock = thread.recv.lock().map_err(DebugError::into_myerror)?;
+            Ok(lock.try_iter().collect())
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn open_remote(&self, remote: SocketAddr) -> MyResult<()> {
+        let mut addr_lock = self
+            .client_addrs
+            .write()
+            .map_err(DebugError::into_myerror)?;
+        let mut stream_lock = self
+            .client_streams
+            .write()
+            .map_err(DebugError::into_myerror)?;
+        let stream = TcpStream::connect(remote)?;
+        stream.set_nonblocking(true)?;
+        stream_lock.push(stream);
+        addr_lock.push(remote);
+        Ok(())
+    }
+
+    fn start_background(&mut self) -> MyResult<()> {
+        self.communication_thread = Some(CommunicationThread::start(
+            Arc::clone(&self.listener),
+            Arc::clone(&self.server_addrs),
+            Arc::clone(&self.client_streams),
+            Arc::clone(&self.server_streams),
+        )?);
+        Ok(())
+    }
+}
+
+impl<T> DebugError for std::sync::PoisonError<T> {
+    fn message(self) -> String {
+        format!("std::sync::PoisonError : {:?}", self)
     }
 }
 
 impl Drop for Communicator {
     fn drop(&mut self) {
-        igd::search_gateway(Default::default()).unwrap().remove_port(igd::PortMappingProtocol::TCP, self.public_ip.port());
+        if !self.public_ip.ip().is_private() {
+            igd::search_gateway(Default::default())
+                .map_err(Box::<dyn std::error::Error>::from)
+                .and_then(|g| {
+                    g.remove_port(igd::PortMappingProtocol::TCP, self.public_ip.port())
+                        .map_err(|e| e.into())
+                }).unwrap();
+        }
     }
 }
-pub fn open_port(min_port: u16, max_port: u16) -> MyResult<TcpListener> {
+fn open_port(min_port: u16, max_port: u16) -> MyResult<TcpListener> {
     let ip = local_network_ip()?;
     let port = random_port(min_port, max_port);
     let addr = SocketAddrV4::new(ip, port);
@@ -357,7 +560,7 @@ pub fn open_port(min_port: u16, max_port: u16) -> MyResult<TcpListener> {
     Ok(listener)
 }
 
-pub fn local_network_ip() -> MyResult<Ipv4Addr> {
+fn local_network_ip() -> MyResult<Ipv4Addr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000))?;
     socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000))?;
     let got_addr = socket.local_addr()?;
@@ -368,14 +571,14 @@ pub fn local_network_ip() -> MyResult<Ipv4Addr> {
     }
 }
 
-pub fn random_port(from: u16, to: u16) -> u16 {
+fn random_port(from: u16, to: u16) -> u16 {
     let valid_range = to - from;
     let info: u16 = rand::random();
     let offset = info % valid_range;
     from + offset
 }
 
-pub fn map_igd(addr: SocketAddrV4) -> MyResult<SocketAddrV4> {
+fn map_igd(addr: SocketAddrV4) -> MyResult<SocketAddrV4> {
     const DEFAULT_LEASE_DURATION: u32 = 60 * 60 * 2;
     let opts = igd::SearchOptions::default();
 
