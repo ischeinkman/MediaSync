@@ -10,203 +10,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-pub fn decode_ipv4(digits: [char; 6]) -> u32 {
-    let mut retvl = 0;
-    for (idx, &c) in digits.iter().enumerate() {
-        let power = 2 - (idx as u32);
-        let scaled = 62u32.pow(power);
-        let coeff = if c >= '0' && c <= '9' {
-            c as u32 - '0' as u32
-        } else if c >= 'a' && c <= 'z' {
-            c as u32 - 'a' as u32 + 10
-        } else if c >= 'A' && c <= 'Z' {
-            c as u32 - 'A' as u32 + 36
-        } else {
-            0
-        };
-        retvl += coeff * scaled;
-    }
-
-    retvl
-}
-
-pub fn decode_port(digits: [char; 3]) -> u16 {
-    let mut retvl = 0u16;
-    for (idx, &c) in digits.iter().enumerate() {
-        let power = 2 - (idx as u32);
-        let scaled = 62u16.pow(power);
-        let coeff = if c >= '0' && c <= '9' {
-            c as u16 - '0' as u16
-        } else if c >= 'a' && c <= 'z' {
-            c as u16 - 'a' as u16 + 10
-        } else if c >= 'A' && c <= 'Z' {
-            c as u16 - 'A' as u16 + 36
-        } else {
-            0
-        };
-        retvl += coeff * scaled;
-    }
-    retvl
-}
-
-pub fn encode_port(port: u16) -> [char; 3] {
-    let mut retvl = ['\0'; 3];
-    let mut left = u32::from(port);
-    let mut cur_idx = 2;
-    while left > 0 {
-        let digit = left % 62;
-        let digit_char = if digit < 10 {
-            std::char::from_digit(digit, 10).unwrap()
-        } else if digit < 36 {
-            let offset = digit - 10 + u32::from('a');
-            std::char::from_u32(offset).unwrap()
-        } else {
-            let offset = digit - 36 + u32::from('A');
-            std::char::from_u32(offset).unwrap()
-        };
-        retvl[cur_idx] = digit_char;
-        if left < 62 {
-            break;
-        }
-        cur_idx -= 1;
-        left /= 62;
-    }
-
-    retvl
-}
-
-pub fn encode_ipv4(ip: u32) -> [char; 6] {
-    let mut retvl = ['\0'; 6];
-    let mut left = ip;
-    let mut cur_idx = 5;
-    while left > 0 {
-        let digit = left % 62;
-        let digit_char = if digit < 10 {
-            std::char::from_digit(digit, 10).unwrap()
-        } else if digit < 36 {
-            let offset = digit - 10 + u32::from('a');
-            std::char::from_u32(offset).unwrap()
-        } else {
-            let offset = digit - 36 + u32::from('A');
-            std::char::from_u32(offset).unwrap()
-        };
-        retvl[cur_idx] = digit_char;
-        if left < 62 {
-            break;
-        }
-        left /= 62;
-        cur_idx -= 1;
-    }
-
-    retvl
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
-pub struct RawBlock {
-    data: [u8; 32],
-}
-
-impl RawBlock {
-    pub fn from_data(data: [u8; 32]) -> Self {
-        Self { data }
-    }
-}
-
-impl RawBlock {
-    pub fn parse(self) -> MyResult<MessageBlock> {
-        let kind = self.data[0];
-        if kind == 0 {
-            let command_byte = self.data[1];
-            let command = TimedCommandKind::from_kind_byte(command_byte).ok_or_else(|| {
-                format!("Error: got invalid TimedCommand kind {:x}", command_byte)
-            })?;
-            let nano_bytes = [
-                self.data[2],
-                self.data[3],
-                self.data[4],
-                self.data[5],
-                self.data[6],
-                self.data[7],
-                self.data[8],
-                self.data[9],
-            ];
-            let nanoseconds = u64::from_le_bytes(nano_bytes);
-            Ok(MessageBlock::TimedCommand {
-                kind: command,
-                nanoseconds,
-            })
-        } else if kind == 1 {
-            let length_bytes = [self.data[1], self.data[2], self.data[3], self.data[4]];
-            let path_length = u32::from_le_bytes(length_bytes);
-            let mut payload = [0u16; 13];
-            for (idx, cur_byte) in payload.iter_mut().enumerate() {
-                let cur_bytes = [self.data[2 * idx + 6], self.data[2 * idx + 7]];
-                *cur_byte = u16::from_le_bytes(cur_bytes);
-            }
-            Ok(MessageBlock::TrackChangeHeader {
-                path_length,
-                payload,
-            })
-        } else if kind == 2 {
-            let idx_bytes = [self.data[1], self.data[2], self.data[3], self.data[4]];
-            let packet_idx = u32::from_le_bytes(idx_bytes);
-            let mut payload = [0u16; 13];
-            for (idx, cur_byte) in payload.iter_mut().enumerate() {
-                let cur_bytes = [self.data[2 * idx + 6], self.data[2 * idx + 7]];
-                *cur_byte = u16::from_le_bytes(cur_bytes);
-            }
-            Ok(MessageBlock::TrackChangePacket {
-                packet_idx,
-                payload,
-            })
-        } else {
-            Err(format!("Error: got invalid message kind {:x}.", kind).into())
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum TimedCommandKind {
-    Ping,
-    Jump,
-    Pause,
-    Play,
-}
-
-impl TimedCommandKind {
-    pub fn from_kind_byte(byte: u8) -> Option<TimedCommandKind> {
-        match byte {
-            0 => Some(TimedCommandKind::Ping),
-            1 => Some(TimedCommandKind::Jump),
-            2 => Some(TimedCommandKind::Pause),
-            3 => Some(TimedCommandKind::Play),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub enum MessageBlock {
-    TimedCommand {
-        kind: TimedCommandKind,
-        nanoseconds: u64,
-    },
-    TrackChangeHeader {
-        path_length: u32, // In UTF16 characters
-        payload: [u16; 13],
-    },
-    TrackChangePacket {
-        packet_idx: u32, // Always > 0
-        payload: [u16; 13],
-    },
-}
-
-impl MessageBlock {
-    pub fn into_raw(self) -> RawBlock {
-        //TODO: this
-        RawBlock::default()
-    }
-}
+mod ipcodec;
+pub use ipcodec::*;
+mod messages;
+pub use messages::*;
 
 pub struct CommunicationThread {
     thread: Arc<thread::JoinHandle<()>>,
@@ -251,7 +58,9 @@ impl CommunicationThread {
 impl Drop for CommunicationThread {
     fn drop(&mut self) {
         //Ignore the error, since we are just trying to shut down the thread anyway
-        self.sender.send(ProtocolMessage::Shutdown).unwrap_or_default();
+        self.sender
+            .send(ProtocolMessage::Shutdown)
+            .unwrap_or_default();
     }
 }
 fn process_stream(
@@ -547,7 +356,8 @@ impl Drop for Communicator {
                 .and_then(|g| {
                     g.remove_port(igd::PortMappingProtocol::TCP, self.public_ip.port())
                         .map_err(|e| e.into())
-                }).unwrap();
+                })
+                .unwrap();
         }
     }
 }

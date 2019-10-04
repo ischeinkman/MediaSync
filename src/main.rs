@@ -6,6 +6,9 @@ use azul::widgets::{label::Label, text_input::*};
 
 use std::thread;
 use std::time::Duration;
+use std::env;
+use std::net::{SocketAddr, SocketAddrV4};
+use std::collections::HashMap;
 
 type MyResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -97,7 +100,7 @@ impl Layout for MyApp {
     fn layout(&self, _: LayoutInfo<Self>) -> Dom<Self> {
         let mut retvl = Dom::div()
             .with_id("root")
-            .with_child(Label::new("VLC Sync").dom());
+            .with_child(Label::new("Ilan's Player Syncer").dom());
 
         if let Some(player) = &self.player {
             retvl.add_child(
@@ -121,7 +124,8 @@ impl Layout for MyApp {
     }
 }
 
-fn main() {
+#[allow(unused)]
+fn azul_main() {
     let mut myapp = MyApp::default();
     println!("MyApp empty.");
     myapp.init().unwrap();
@@ -131,12 +135,12 @@ fn main() {
     let mut app = App::new(
         myapp,
         AppConfig {
-            enable_logging: Some(LevelFilter::Debug),
+            //enable_logging: Some(LevelFilter::Debug),
             renderer_type: RendererType::Hardware,
             debug_state: DebugState {
-                profiler_dbg: true,
-                compact_profiler: true,
-                echo_driver_messages: true,
+                //profiler_dbg: true,
+                //compact_profiler: true,
+                //echo_driver_messages: true,
 
                 ..Default::default()
             },
@@ -181,4 +185,90 @@ pub trait DebugError: Sized {
 pub trait MediaPlayer {
     fn name(&self) -> &str;
     fn on_message(&mut self, message: ProtocolMessage) -> MyResult<()>;
+}
+
+pub fn main() {
+    let args = Args::parse(env::args(), vec!["--connect".to_owned(), "-c".to_owned()], vec![]).unwrap();
+    println!("Now starting Ilan's Media Sync...");
+    let mut app = MyApp::default();
+    app.init().unwrap();
+    println!("Initialized successfully.");
+    println!("Using player: {}", app.player.as_ref().map(|p| p.name().to_owned()).unwrap_or_else(|| "NONE".to_owned()));
+    let friend_code = app.comms.as_ref().map(|c| communication::encode_socketaddrv4(c.public_ip).iter().collect()).unwrap_or_else(|| "NONE".to_owned());
+    println!("Friend code: {}", friend_code);
+    if args.key_value.contains_key(&"-c".to_owned()) || args.key_value.contains_key(&"--connect".to_owned()) {
+        let remote :&str = args.key_value.get(&"-c".to_owned()).or_else(|| args.key_value.get(&"--connect".to_owned())).ok_or_else(||"Error finding argument to --connect!".to_owned()).unwrap();
+        let remote = remote.trim();
+        if remote.len() != 9 {
+            println!("Error: {} is not a valid friend code!", remote);
+        }
+        println!("Trying to connect to friend using code {}", remote);
+        let mut chars_iter = remote.chars();
+        let addr_chars = [
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 0".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 1".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 2".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 3".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 4".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 5".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 6".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 7".to_owned()).unwrap(),
+            chars_iter.next().ok_or_else(|| "Error getting friend's code char at index 8".to_owned()).unwrap(),
+        ];
+        let remote_addr : SocketAddrV4 = communication::decode_socketaddrv4(addr_chars);
+        println!("Found remote address {} : {}", *remote_addr.ip(), remote_addr.port());
+        println!("Trying to connect...");
+        let comms = app.comms.as_mut().ok_or_else(||("Error: comms did not init successfully before trying connection?".to_owned())).unwrap();
+        comms.open_remote(SocketAddr::V4(remote_addr)).unwrap();
+        println!("Connected!");
+    }
+    println!("Starting local event thread...");
+    app.start_local_event_thread().unwrap();
+    println!("Success! Everything should hopefully be in working order.");
+    let mut prev_clients = 0;
+    let mut prev_servers = 0;
+    loop {
+
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct Args {
+    key_value : HashMap<String, String>, 
+    flags : Vec<String>, 
+    nameless : Vec<String>,
+}
+
+impl Args {
+    pub fn parse(iter : impl IntoIterator<Item = impl AsRef<str>>, valid_keys : Vec<String>, valid_flags : Vec<String>) -> MyResult<Self> {
+        let mut retvl = Args::default();
+        let mut arg_iter = iter.into_iter();
+        while let Some(arg) = arg_iter.next() {
+            let arg = arg.as_ref().to_owned();
+            if !arg.starts_with('-') {
+                retvl.nameless.push(arg);
+            }
+            else if valid_flags.contains(&arg) {
+                retvl.flags.push(arg);
+            }
+            else if valid_keys.contains(&arg) {
+                let value = arg_iter.next().ok_or_else(||format!("Error parsing args: found now value for key {}", arg))?.as_ref().to_owned();
+                retvl.key_value.insert(arg, value);
+            }
+            else if arg.contains('=') {
+                let mut kv_iter = arg.splitn(2, '=');
+                let key = kv_iter.next().ok_or_else(|| format!("Error parsing arg {}: somehow can't split in the split branch? Dafuq?", arg))?.to_owned();
+                let value = kv_iter.next().ok_or_else(|| format!("Error parsing arg {}: somehow can't split in the split branch? Dafuq?", arg))?.to_owned();
+                if valid_keys.contains(&key) {
+                    retvl.key_value.insert(key, value);
+                }
+                else {
+                    return Err(format!("Error: found invalid key-value pair: '{}' => '{}'", key, value).into());
+                }
+            }
+
+        }
+
+        Ok(retvl)
+    }
 }
