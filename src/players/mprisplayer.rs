@@ -17,7 +17,7 @@ pub struct MprisPlayerHandle<'a> {
 
 pub struct PlayerStatus {
     is_paused: bool,
-    track: Option<mpris::TrackID>,
+    track_id: Option<mpris::TrackID>,
     track_url: Option<String>,
     position: Duration,
     prev_events: Vec<PlayerEvent>,
@@ -34,7 +34,8 @@ impl PlayerStatus {
 }
 
 impl<'a> MprisPlayerHandle<'a> {
-    pub fn from_player(player: mpris::Player<'a>) -> MyResult<Self> {
+    pub fn from_player(mut player: mpris::Player<'a>) -> MyResult<Self> {
+        player.set_dbus_timeout_ms(100);
         let retvl = Self {
             name: player.identity().to_owned(),
             player,
@@ -54,7 +55,7 @@ impl<'a> MprisPlayerHandle<'a> {
             .get_playback_status()
             .map_err(DebugError::into_myerror)?
             == mpris::PlaybackStatus::Paused;
-        let track = self.current_trackid()?;
+        let track_id = self.current_trackid()?;
         let position = self
             .player
             .get_position()
@@ -69,7 +70,7 @@ impl<'a> MprisPlayerHandle<'a> {
             .map(|s| s.to_owned());
         Ok(PlayerStatus {
             is_paused,
-            track,
+            track_id,
             position,
             track_url,
             prev_events: Vec::new(),
@@ -90,28 +91,42 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
                     None => return Ok(()),
                 };
                 crate::debug_print(format!("Hello cutie"));
-                self.player.set_dbus_timeout_ms(100);
                 crate::debug_print(format!("You're amazing"));
                 self.player
                     .set_position(current_track_id, &time)
                     .map_err(DebugError::into_myerror)?;
                 crate::debug_print(format!("And I love you"));
                 self.player.play().map_err(DebugError::into_myerror)?;
+                if let Some(prev) = self.previous_status.as_mut() {
+                    prev.position = time;
+                }
+
                 println!("Finished jump?");
             }
             PlayerEvent::Pause => {
                 crate::debug_print(format!("Player got paused."));
                 self.player.pause().map_err(DebugError::into_myerror)?;
+                if let Some(prev) = self.previous_status.as_mut() {
+                    prev.is_paused = true;
+                }
             }
             PlayerEvent::Play => {
                 crate::debug_print(format!("Player got played."));
                 self.player.play().map_err(DebugError::into_myerror)?;
+                if let Some(prev) = self.previous_status.as_mut() {
+                    prev.is_paused = false;
+                }
             }
             PlayerEvent::MediaOpen(url) => {
                 crate::debug_print(format!("Player got open: {}.", url));
                 self.player
                     .add_track_at_start(&url, true)
                     .map_err(DebugError::into_myerror)?;
+                let new_id = self.current_trackid()?;
+                if let Some(prev) = self.previous_status.as_mut() {
+                    prev.track_url = Some(url);
+                    prev.track_id = new_id;
+                }
             }
             _ => unimplemented!(),
         }
@@ -154,6 +169,9 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
             self.player
                 .set_position(current_track, &adapted_time)
                 .map_err(DebugError::into_myerror)?;
+            if let Some(prev) = self.previous_status.as_mut() {
+                prev.position = adapted_time;
+            }
         }
         crate::debug_print(format!("Got ping {}", ping.as_micros() / 1000));
         Ok(())
@@ -161,11 +179,9 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
 
     fn check_events(&mut self, time_since_previous: Duration) -> MyResult<Vec<PlayerEvent>> {
         crate::debug_print(format!("{}: Start check_events", self.name,));
-        {
-            if !self.player.is_running() {
-                crate::debug_print(format!("{}: Found shutdown in check_events", self.name,));
-                return Ok(vec![PlayerEvent::Shutdown]);
-            }
+        if !self.player.is_running() {
+            crate::debug_print(format!("{}: Found shutdown in check_events", self.name,));
+            return Ok(vec![PlayerEvent::Shutdown]);
         }
         let mut retvl = Vec::new();
         let mut current_status = self.current_status()?;
@@ -198,10 +214,10 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
                         .cloned()
                         .unwrap_or_else(|| "".to_owned());
                     retvl.push(PlayerEvent::MediaOpen(url.clone()));
-                    let current_id = current_status.track.clone();
+                    let current_id = current_status.track_id.clone();
                     let prev_id = prev_status_lock
                         .as_ref()
-                        .and_then(|t| t.track.as_ref().cloned());
+                        .and_then(|t| t.track_id.as_ref().cloned());
                     crate::debug_print(format!("Player sending url {}", url));
                     crate::debug_print(format!("    ID change: {:?} => {:?}", prev_id, current_id));
                 }
