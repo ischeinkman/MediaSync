@@ -1,13 +1,14 @@
-use crate::communication::{ConnectionsThreadHandle, ConnnectionThread, FileTransferClient, FileTransferHost, FriendCodeV4};
-use crate::traits::{MediaPlayer};
+use crate::communication::{
+    ConnectionsThreadHandle, ConnnectionThread, FileTransferClient, FileTransferHost, FriendCodeV4,
+};
 use crate::events::{PlayerEvent, RemoteEvent};
 use crate::players;
-use crate::{MyResult, DebugError};
+use crate::traits::MediaPlayer;
+use crate::{DebugError, MyResult};
+use std::net::SocketAddr;
 use std::sync::{self, Arc, Mutex, RwLock};
 use std::thread;
-use std::net::{SocketAddr};
-use std::time::{Instant, Duration};
-
+use std::time::{Duration, Instant};
 
 #[derive(Eq, PartialEq, Clone)]
 pub enum MediaOpenState {
@@ -387,6 +388,9 @@ impl AppState {
     }
 
     pub fn comms_thread_up(&self) -> bool {
-        self.comms.as_ref().map(|c| !c.has_paniced()).unwrap_or(false)
+        self.comms
+            .as_ref()
+            .map(|c| !c.has_paniced())
+            .unwrap_or(false)
     }
 }

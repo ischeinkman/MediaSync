@@ -1,6 +1,6 @@
 use crate::communication::FriendCodeV4;
 use crate::communication::*;
-use crate::{MyResult};
+use crate::MyResult;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};

@@ -1,4 +1,4 @@
-use crate::{ MyResult};
+use crate::MyResult;
 use std::time::Duration;
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
@@ -19,10 +19,8 @@ impl TimePing {
     pub fn from_micros(micros: u64) -> TimePing {
         Duration::from_micros(micros).into()
     }
-    pub fn from_duration(time : Duration) -> TimePing {
-        TimePing {
-            time,
-        }
+    pub fn from_duration(time: Duration) -> TimePing {
+        TimePing { time }
     }
     pub fn as_micros(&self) -> u64 {
         self.time.as_micros() as u64
@@ -37,8 +35,6 @@ impl From<Duration> for TimePing {
         TimePing { time }
     }
 }
-
-
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RemoteEvent {
@@ -321,7 +317,6 @@ impl BlockParser {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,7 +325,7 @@ mod tests {
         let mut parser = BlockParser::new();
         let ping_time = 1000 * 1000 * 60 * 132;
         let ping = RemoteEvent::Ping(TimePing::from_micros(ping_time));
-        let mut ping_raw = ping.as_blocks(); 
+        let mut ping_raw = ping.as_blocks();
         assert_eq!(1, ping_raw.len());
         assert_eq!(0, ping_raw[0].kind());
         assert_eq!(ping_time, ping_raw[0].count_u64());
@@ -343,14 +338,18 @@ mod tests {
     fn test_mediaopen_parsing() {
         let msg = "file:///home/test/some/long/path_to_a_file_to_play.mkv";
         let expected_bytes = msg.as_bytes().len();
-        let expected_packets = 1 + expected_bytes/RawBlock::PAYLOAD_SIZE;
+        let expected_packets = 1 + expected_bytes / RawBlock::PAYLOAD_SIZE;
 
         let event = RemoteEvent::MediaOpen(msg.to_owned());
         let packets = event.as_blocks();
         assert_eq!(expected_packets, packets.len());
 
         let mut parser = BlockParser::new();
-        let parsed = packets.into_iter().filter_map(|block| parser.parse_next(block).unwrap()).next().unwrap();
+        let parsed = packets
+            .into_iter()
+            .filter_map(|block| parser.parse_next(block).unwrap())
+            .next()
+            .unwrap();
         assert_eq!(event, parsed);
     }
 }

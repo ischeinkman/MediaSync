@@ -211,7 +211,7 @@ pub struct ConnectionsThreadHandle {
 pub enum ConnectionMessage {
     ConnectRemote(SocketAddr),
     OpenPublic,
-    Ping, 
+    Ping,
 }
 
 impl ConnectionsThreadHandle {
@@ -270,10 +270,10 @@ impl ConnectionsThreadHandle {
     }
 
     pub fn has_paniced(&self) -> bool {
-       match  self.message_channel.send(ConnectionMessage::Ping) {
-           Ok(()) => false, 
-           Err(std::sync::mpsc::SendError(_)) => true,
-       }
+        match self.message_channel.send(ConnectionMessage::Ping) {
+            Ok(()) => false,
+            Err(std::sync::mpsc::SendError(_)) => true,
+        }
     }
 }
 
@@ -324,7 +324,6 @@ impl ConnnectionThread {
             public_addr: Arc::new(RwLock::new(None)),
             client_addresses: Arc::new(RwLock::new(Vec::new())),
             server_addresses: Arc::new(RwLock::new(Vec::new())),
-        
             message_channel: None,
             event_channel: None,
             event_recv: None,
@@ -387,7 +386,10 @@ impl ConnnectionThread {
                 Ok(ConnectionMessage::Ping) => {}
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    crate::debug_print(format!("Comms thread dying due to error:  {:?}", mpsc::TryRecvError::Disconnected));
+                    crate::debug_print(format!(
+                        "Comms thread dying due to error:  {:?}",
+                        mpsc::TryRecvError::Disconnected
+                    ));
                     Result::<(), _>::Err(mpsc::TryRecvError::Disconnected).unwrap();
                 }
             }
@@ -408,7 +410,10 @@ impl ConnnectionThread {
                         continue;
                     }
                     Err(e) => {
-                        crate::debug_print(format!("Comms thread dying due to error:  {:?}", mpsc::TryRecvError::Disconnected));
+                        crate::debug_print(format!(
+                            "Comms thread dying due to error:  {:?}",
+                            mpsc::TryRecvError::Disconnected
+                        ));
                         Err(e).unwrap()
                     }
                 };

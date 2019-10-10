@@ -2,7 +2,7 @@
 
 mod communication;
 mod events;
-use events::{RemoteEvent};
+use events::RemoteEvent;
 mod players;
 mod traits;
 
@@ -293,7 +293,6 @@ impl Args {
         Ok(retvl)
     }
 }
-
 
 pub fn debug_print(msg: String) {
     use std::io::Write;
