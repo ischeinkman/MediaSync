@@ -2,11 +2,9 @@ use crate::events;
 use crate::events::RemoteEvent;
 use crate::DebugError;
 use crate::MyResult;
-use igd;
-use rand;
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -18,29 +16,13 @@ mod ipcodec;
 pub use ipcodec::*;
 mod filetransfer;
 pub use filetransfer::*;
+mod networking;
+pub use networking::*;
 
 impl<T> DebugError for std::sync::PoisonError<T> {
     fn message(self) -> String {
         format!("std::sync::PoisonError : {:?}", self)
     }
-}
-
-fn local_network_ip() -> MyResult<Ipv4Addr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000))?;
-    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000))?;
-    let got_addr = socket.local_addr()?;
-    if let IpAddr::V4(ip) = got_addr.ip() {
-        Ok(ip)
-    } else {
-        Err(format!("Error: got invalid IP: {:?}", got_addr.ip()).into())
-    }
-}
-
-fn random_port(from: u16, to: u16) -> u16 {
-    let valid_range = to - from;
-    let info: u16 = rand::random();
-    let offset = info % valid_range;
-    from + offset
 }
 
 struct MessageBuffer {
@@ -60,137 +42,6 @@ impl MessageBuffer {
 
     pub fn empty_space_mut(&mut self) -> &mut [u8] {
         &mut self.bytes[self.bytes_read..]
-    }
-}
-
-pub struct IgdArgs {
-    pub search_args: igd::SearchOptions,
-    pub lease_duration: Duration,
-    pub protocol: igd::PortMappingProtocol,
-}
-
-impl Default for IgdArgs {
-    fn default() -> Self {
-        IgdArgs {
-            protocol: igd::PortMappingProtocol::TCP,
-            lease_duration: Duration::from_secs(60 * 60 * 2),
-            search_args: Default::default(),
-        }
-    }
-}
-
-impl Clone for IgdArgs {
-    fn clone(&self) -> Self {
-        IgdArgs {
-            search_args: igd::SearchOptions { ..self.search_args },
-            lease_duration: self.lease_duration,
-            protocol: self.protocol,
-        }
-    }
-}
-
-impl PartialEq for IgdArgs {
-    fn eq(&self, other: &IgdArgs) -> bool {
-        self.lease_duration == other.lease_duration
-            && self.protocol == other.protocol
-            && self.search_args.bind_addr == other.search_args.bind_addr
-            && self.search_args.broadcast_address == other.search_args.broadcast_address
-            && self.search_args.timeout == other.search_args.timeout
-    }
-}
-
-impl Eq for IgdArgs {}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct IgdMapping {
-    local_addr: SocketAddr,
-    public_addr: SocketAddr,
-    args: IgdArgs,
-}
-
-impl IgdMapping {
-    pub fn request_any(
-        local_addr: SocketAddrV4,
-        args: IgdArgs,
-        description: &str,
-    ) -> MyResult<IgdMapping> {
-        let gateway = igd::search_gateway(args.clone().search_args)?;
-        let lease_duration = args.lease_duration.as_secs() as u32;
-        let public_addr =
-            gateway.get_any_address(args.protocol, local_addr, lease_duration, description)?;
-        Ok(IgdMapping {
-            local_addr: local_addr.into(),
-            public_addr: public_addr.into(),
-            args,
-        })
-    }
-
-    fn close_inner(&mut self) -> MyResult<()> {
-        let gateway = igd::search_gateway(igd::SearchOptions {
-            ..self.args.search_args
-        })?;
-        match gateway.remove_port(self.args.protocol, self.public_addr.port()) {
-            Ok(()) => Ok(()),
-            Err(igd::RemovePortError::NoSuchPortMapping) => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    pub fn close(mut self) -> MyResult<()> {
-        self.close_inner()
-    }
-}
-
-impl Drop for IgdMapping {
-    fn drop(&mut self) {
-        self.close_inner().unwrap();
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub enum PublicAddr {
-    Igd(IgdMapping),
-    Raw(SocketAddr),
-}
-
-impl From<IgdMapping> for PublicAddr {
-    fn from(mapping: IgdMapping) -> PublicAddr {
-        PublicAddr::Igd(mapping)
-    }
-}
-
-impl PublicAddr {
-    pub fn request_public(local_addr: SocketAddr) -> MyResult<PublicAddr> {
-        match local_addr {
-            SocketAddr::V4(addr) => {
-                let ip = addr.ip();
-                if ip.is_loopback() || ip.is_broadcast() || ip.is_unspecified() {
-                    Err(format!("Error: got invalid local address {}:{}", ip, addr.port()).into())
-                } else if ip.is_private() {
-                    let mapped = IgdMapping::request_any(
-                        addr,
-                        IgdArgs::default(),
-                        &format!("IlSync Mapping for local ip {}:{}", ip, addr.port()),
-                    )?;
-                    Ok(PublicAddr::Igd(mapped))
-                } else {
-                    Ok(PublicAddr::Raw(local_addr))
-                }
-            }
-            SocketAddr::V6(addr) => Err(format!(
-                "Error: IPv6 address {}:{} is not yet supported.",
-                *addr.ip(),
-                addr.port()
-            )
-            .into()),
-        }
-    }
-
-    pub fn addr(&self) -> SocketAddr {
-        match self {
-            PublicAddr::Igd(mapping) => mapping.public_addr,
-            PublicAddr::Raw(addr) => *addr,
-        }
     }
 }
 
@@ -311,11 +162,7 @@ pub struct ConnnectionThread {
 }
 impl ConnnectionThread {
     pub fn open(min_port: u16, max_port: u16) -> MyResult<Self> {
-        let ip = local_network_ip()?;
-        let port = random_port(min_port, max_port);
-        let addr = SocketAddrV4::new(ip, port);
-        let listener = TcpListener::bind(addr)?;
-        listener.set_nonblocking(true)?;
+        let listener = random_listener(min_port, max_port)?;
         Ok(ConnnectionThread::new(listener))
     }
     pub fn new(listener: TcpListener) -> ConnnectionThread {
@@ -334,6 +181,48 @@ impl ConnnectionThread {
             stream_buffers: HashMap::new(),
         }
     }
+
+    fn check_new_connections(&mut self) -> MyResult<Option<SocketAddr>> {
+        match self.listener.accept() {
+            Ok((stream, addr)) => {
+                stream.set_nonblocking(true)?;
+                self.host_connections.push(stream);
+                self.server_addresses.write().unwrap().push(addr);
+                Ok(Some(addr))
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+    fn process_connection_message(&mut self) -> MyResult<()> {
+        let local_addr = self.listener.local_addr()?;
+        let channel = self
+            .message_channel
+            .as_ref()
+            .ok_or_else(|| "No message channel found for comms thread!")?;
+        let msg = channel.try_recv();
+        match msg {
+            Ok(ConnectionMessage::ConnectRemote(addr)) => {
+                println!("Trying to connect to addr {:?}", addr);
+                let connection = std::net::TcpStream::connect(addr).unwrap();
+                connection.set_nonblocking(true).unwrap();
+                self.client_connections.push(connection);
+                self.client_addresses.write().unwrap().push(addr);
+                Ok(())
+            }
+            Ok(ConnectionMessage::OpenPublic) => {
+                let mut addr_lock = self.public_addr.write().unwrap();
+                if addr_lock.is_none() {
+                    let new_public_addr = PublicAddr::request_public(local_addr)?;
+                    *addr_lock = Some(new_public_addr);
+                }
+                Ok(())
+            }
+            Ok(ConnectionMessage::Ping) => Ok(()),
+            Err(mpsc::TryRecvError::Empty) => Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected.into()),
+        }
+    }
     pub fn start(mut self) -> MyResult<ConnectionsThreadHandle> {
         let local_addr = self.listener.local_addr()?;
         let (message_channel_sender, message_channel_reciever) = mpsc::channel();
@@ -348,91 +237,103 @@ impl ConnnectionThread {
         let client_addresses = Arc::clone(&self.client_addresses);
         let server_addresses = Arc::clone(&self.server_addresses);
         let handle = thread::spawn(move || loop {
-            match self.listener.accept() {
-                Ok((stream, addr)) => {
-                    stream.set_nonblocking(true).unwrap();
-                    self.host_connections.push(stream);
-                    self.server_addresses.write().unwrap().push(addr);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => {
-                    crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
-                    Result::<(), std::io::Error>::Err(e).unwrap();
-                }
+            if let Err(e) = self.check_new_connections() {
+                crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
+                MyResult::<()>::Err(e).unwrap();
             }
-            match self.message_channel.as_ref().unwrap().try_recv() {
-                Ok(ConnectionMessage::ConnectRemote(addr)) => {
-                    println!("Trying to connect to addr {:?}", addr);
-                    let connection = std::net::TcpStream::connect(addr).unwrap();
-                    self.client_connections.push(connection);
-                    self.client_addresses.write().unwrap().push(addr);
-                }
-                Ok(ConnectionMessage::OpenPublic) => {
-                    let mut addr_lock = self.public_addr.write().unwrap();
-                    if !addr_lock.is_some() {
-                        let new_public_addr = {
-                            let addr = match local_addr {
-                                        SocketAddr::V4(ipprt) => Ok(ipprt),
-                                        SocketAddr::V6(ipprt) => {
-                                            Err(format!("Error: IPv6 address {:?} does not yet support public mappings.", ipprt).into())
-                                        }
-                                    };
-                            let mapped = addr.and_then(|a| PublicAddr::request_public(a.into()));
-                            mapped.unwrap()
-                        };
-                        *addr_lock = Some(new_public_addr);
-                    }
-                }
-                Ok(ConnectionMessage::Ping) => {}
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    crate::debug_print(format!(
-                        "Comms thread dying due to error:  {:?}",
-                        mpsc::TryRecvError::Disconnected
-                    ));
-                    Result::<(), _>::Err(mpsc::TryRecvError::Disconnected).unwrap();
-                }
+            if let Err(e) = self.process_connection_message() {
+                crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
+                MyResult::<()>::Err(e).unwrap();
             }
 
             if !self.client_connections.is_empty() || !self.host_connections.is_empty() {}
+            let valid_client_connections =
+                self.client_connections.iter_mut().filter_map(|stream| {
+                    let addr_opt = validate_connection(stream).unwrap();
+                    addr_opt.map(|addr| (addr, stream))
+                });
 
-            let mut valid_streams: Vec<_> = self
-                .client_connections
-                .iter_mut()
-                .chain(self.host_connections.iter_mut())
-                .filter(|con| con.peer_addr().is_ok())
-                .collect();
-
-            for stream in &mut valid_streams {
-                let addr = match stream.peer_addr() {
-                    Ok(addr) => addr,
-                    Err(ref e) if e.kind() == std::io::ErrorKind::NotConnected => {
-                        continue;
-                    }
-                    Err(e) => {
-                        crate::debug_print(format!(
-                            "Comms thread dying due to error:  {:?}",
-                            mpsc::TryRecvError::Disconnected
-                        ));
-                        Err(e).unwrap()
-                    }
-                };
+            let mut client_events = Vec::new();
+            for (addr, stream) in valid_client_connections {
                 let buffer = self
                     .stream_buffers
                     .entry(addr)
                     .or_insert_with(MessageBuffer::new);
-                while let Some(evt) = check_stream_events(stream, buffer).unwrap() {
-                    self.event_recv.as_mut().unwrap().send(evt).unwrap();
-                }
+                let cur_events = stream_event_iter(stream, buffer).map(|res| res.unwrap());
+                client_events.extend(cur_events);
             }
-            for evt in self.event_channel.as_ref().unwrap().try_iter() {
+
+            let self_events: Vec<_> = self
+                .event_channel
+                .as_ref()
+                .into_iter()
+                .flat_map(|channel| channel.try_iter())
+                .collect();
+
+            let valid_host_connections = self.host_connections.iter_mut().filter_map(|stream| {
+                let addr_opt = validate_connection(stream).unwrap();
+                addr_opt.map(|addr| (addr, stream))
+            });
+            let mut host_events = Vec::new();
+            for (addr, stream) in valid_host_connections {
+                let buffer = self
+                    .stream_buffers
+                    .entry(addr)
+                    .or_insert_with(MessageBuffer::new);
+                let cur_events = stream_event_iter(stream, buffer).map(|res| res.unwrap());
+                host_events.extend(cur_events);
+            }
+
+            let relevant_client_events = client_events.clone();
+            let relevant_self_events =
+                filter_lower_events(self_events.clone(), client_events.clone());
+            let relevant_host_events = filter_lower_events(
+                host_events,
+                client_events.iter().chain(self_events.iter()).cloned(),
+            );
+
+            let mut jumped = false;
+            for evt in relevant_host_events {
+                if let RemoteEvent::Jump(_) = evt {
+                    jumped = true;
+                }
+                self.event_recv.as_ref().unwrap().send(evt.clone()).unwrap();
+            }
+
+            for evt in relevant_self_events {
+                if let RemoteEvent::Jump(_) = evt {
+                    jumped = true;
+                } else if let RemoteEvent::Ping(_) = evt {
+                    if jumped {
+                        continue;
+                    }
+                }
                 let event_blocks = evt.as_blocks();
-                for stream in valid_streams.iter_mut() {
-                    for block in event_blocks.iter() {
+                for block in event_blocks {
+                    let all_streams = self
+                        .client_connections
+                        .iter_mut()
+                        .chain(self.host_connections.iter_mut());
+                    let valid_streams = all_streams.filter_map(|stream| {
+                        let addr_opt = validate_connection(stream).unwrap();
+                        addr_opt.map(|_| stream)
+                    });
+                    for stream in valid_streams {
                         stream.write_all(block.as_bytes()).unwrap();
                     }
                 }
             }
+            for evt in relevant_client_events {
+                if let RemoteEvent::Jump(_) = evt {
+                    jumped = true;
+                } else if let RemoteEvent::Ping(_) = evt {
+                    if jumped {
+                        continue;
+                    }
+                }
+                self.event_recv.as_ref().unwrap().send(evt.clone()).unwrap();
+            }
+
             thread::sleep(Duration::from_millis(20));
         });
         let retvl = ConnectionsThreadHandle {
@@ -450,6 +351,7 @@ impl ConnnectionThread {
         Ok(retvl)
     }
 }
+
 fn check_stream_events(
     stream: &mut TcpStream,
     buffer: &mut MessageBuffer,
@@ -472,5 +374,72 @@ fn check_stream_events(
         buffer.parser.parse_next(block)
     } else {
         Ok(None)
+    }
+}
+
+struct StreamEventIter<'a, 'b> {
+    stream: &'a mut TcpStream,
+    buffer: &'b mut MessageBuffer,
+}
+
+impl<'a, 'b> Iterator for StreamEventIter<'a, 'b> {
+    type Item = MyResult<RemoteEvent>;
+    fn next(&mut self) -> Option<MyResult<RemoteEvent>> {
+        match check_stream_events(self.stream, self.buffer) {
+            Ok(Some(evt)) => Some(Ok(evt)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+fn stream_event_iter<'a, 'b>(
+    stream: &'a mut TcpStream,
+    buffer: &'b mut MessageBuffer,
+) -> StreamEventIter<'a, 'b> {
+    StreamEventIter { stream, buffer }
+}
+
+fn filter_lower_events(
+    cur_events: impl IntoIterator<Item = RemoteEvent>,
+    previous_events: impl IntoIterator<Item = RemoteEvent>,
+) -> impl Iterator<Item = RemoteEvent> {
+    let mut prev_has_playpause = false;
+    let mut prev_has_jump = false;
+    let mut prev_has_ping = false;
+    let mut prev_has_mediaopen = false;
+    for prev in previous_events {
+        match prev {
+            RemoteEvent::Play | RemoteEvent::Pause => {
+                prev_has_playpause = true;
+            }
+            RemoteEvent::Jump(_) => {
+                prev_has_jump = true;
+            }
+            RemoteEvent::Ping(_) => {
+                prev_has_ping = true;
+            }
+            RemoteEvent::MediaOpen(_) => {
+                prev_has_mediaopen = true;
+            }
+            _ => {}
+        }
+    }
+    cur_events.into_iter().filter(move |evt| match evt {
+        RemoteEvent::Play | RemoteEvent::Pause => !prev_has_playpause,
+        RemoteEvent::Jump(_) => !prev_has_jump,
+        RemoteEvent::Ping(_) => !prev_has_jump && !prev_has_ping,
+        RemoteEvent::MediaOpen(_) => !prev_has_mediaopen,
+        _ => true,
+    })
+}
+
+fn validate_connection(stream: &TcpStream) -> MyResult<Option<SocketAddr>> {
+    match stream.peer_addr() {
+        Ok(addr) => Ok(Some(addr)),
+        Err(ref e) if e.kind() == io::ErrorKind::NotConnected => Ok(None),
+        Err(ref e) if e.kind() == io::ErrorKind::ConnectionAborted => Ok(None),
+        Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }

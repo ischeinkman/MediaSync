@@ -71,11 +71,7 @@ impl FileTransferHost {
 }
 
 fn open_listener(min_port: u16, max_port: u16) -> MyResult<TcpListener> {
-    let ip = local_network_ip()?;
-    let port = random_port(min_port, max_port);
-    let addr = SocketAddrV4::new(ip, port);
-    let listener = TcpListener::bind(addr)?;
-    listener.set_nonblocking(true)?;
+    let listener = random_listener(min_port, max_port)?;
     Ok(listener)
 }
 
