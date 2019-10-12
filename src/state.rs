@@ -131,23 +131,7 @@ impl AppState {
                 continue;
             }
             let has_transfer = if let MediaOpenState::Okay(_) = *state_ref.read().unwrap() {
-                if let Some(PlayerEvent::MediaOpen(url)) = player_events.iter().find(|evt| {
-                    if let PlayerEvent::MediaOpen(_) = evt {
-                        true
-                    } else {
-                        false
-                    }
-                }) {
-                    comms_ref
-                        .send_event(PlayerEvent::MediaOpen(url.clone()).into())
-                        .unwrap();
-                    player_lock.send_event(PlayerEvent::Pause).unwrap();
-                    *state_ref.write().unwrap() = MediaOpenState::Broadcasting(url.clone());
-                    crate::debug_print(format!("REMOTE: state transition to Broadcast({})", url));
-                    true
-                } else {
-                    false
-                }
+                false
             } else {
                 true
             };
@@ -161,6 +145,10 @@ impl AppState {
                     .unwrap();
             } else {
                 crate::debug_print(format!("REMOTE: Not sending events: has transfer"));
+                if !player_events.iter().all(|evt| evt != &PlayerEvent::Play) {
+                    player_lock.send_event(PlayerEvent::Pause).unwrap();
+                    crate::debug_print("LOCAL: Repausing player.".to_owned());
+                }
             }
             crate::debug_print(format!("REMOTE: recieved events {:?}", remote_events));
             for evt in remote_events {
@@ -201,6 +189,7 @@ impl AppState {
                             *state_ref.write().unwrap() =
                                 MediaOpenState::Requesting(url.to_owned());
                             callback.send(evt).unwrap();
+                            break;
                         } else {
                             comms_ref
                                 .send_event(RemoteEvent::MediaOpenOkay(url.to_owned()))
