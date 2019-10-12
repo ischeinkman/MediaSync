@@ -10,7 +10,6 @@ edition = "2018"
 igd = "0.9.1"
 rand = "0.7"
 mpris = "2.0.0-rc1"
-azul = {git = "https://github.com/maps4print/azul", optional=true}
+clap = "2.33"
 
 [features]
-gui-azul = ["azul"]
