@@ -156,7 +156,7 @@ fn simpleui_request_transfer(
     state: &mut AppState,
     url: &str,
     timeout: Duration,
-) -> MyResult<Option<RemoteEvent>> {
+) -> MyResult<Option<(u64, [char; 9])>> {
     state.request_transfer(url.to_owned())?;
     println!("Now waiting for a response ...");
     let wait_start = Instant::now();
@@ -165,12 +165,16 @@ fn simpleui_request_transfer(
             break None;
         }
         let found_event = state.pop_event().and_then(|evt| match evt {
-            RemoteEvent::RespondTransfer { .. } => Some(evt),
+            RemoteEvent::RespondTransfer {
+                size,
+                transfer_code,
+            } => transfer_code.map(|c| (size, c)),
             _ => None,
         });
         if found_event.is_some() {
             break found_event;
         }
+        thread::yield_now();
     };
     Ok(response)
 }
@@ -225,22 +229,10 @@ pub fn main() {
                                 &url,
                                 Duration::from_secs(30),
                             )
-                            .unwrap()
-                            .and_then(|evt| match evt {
-                                RemoteEvent::RespondTransfer {
-                                    size,
-                                    transfer_code: Some(code),
-                                } => Some((size, code)),
-                                _ => None,
-                            });
+                            .unwrap();
                             if let Some((size, code)) = response {
-                                state
-                                    .start_transfer(
-                                        url.clone(),
-                                        size,
-                                        FriendCodeV4::from_code(code),
-                                    )
-                                    .unwrap();
+                                let code = FriendCodeV4::from_code(code);
+                                state.start_transfer(url.clone(), size, code).unwrap();
                                 let transfer =
                                     state.active_transfers().find(|t| t.url() == url).unwrap();
                                 let mut prev_percent = 0.0;
@@ -324,7 +316,7 @@ impl Args {
 }
 
 #[inline(always)]
-pub fn debug_print(msg: String) {
+pub fn debug_print(_msg: String) {
     /*
     use std::io::Write;
     let mut fl = std::fs::OpenOptions::new()

@@ -25,7 +25,7 @@ impl FileTransferHost {
     pub fn new(url: String) -> MyResult<FileTransferHost> {
         let stripped_url = url.trim_start_matches("file://");
         let die_flag = Arc::new(AtomicBool::new(false));
-        let listener = open_listener(40_000, 41_000)?;
+        let listener = random_listener(40_000, 41_000)?;
         let local_address = listener.local_addr()?;
         let file = OpenOptions::new().read(true).open(stripped_url)?;
         let file_size = file.metadata()?.len();
@@ -68,11 +68,6 @@ impl FileTransferHost {
         })?;
         Ok(())
     }
-}
-
-fn open_listener(min_port: u16, max_port: u16) -> MyResult<TcpListener> {
-    let listener = random_listener(min_port, max_port)?;
-    Ok(listener)
 }
 
 fn file_transfer_host_thread(

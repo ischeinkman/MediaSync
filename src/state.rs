@@ -41,13 +41,11 @@ impl AppState {
     }
 
     pub fn start_comms(&mut self) -> MyResult<()> {
-        if self.comms.is_some() {
-            Ok(())
-        } else {
+        if self.comms.is_none() {
             let comms = ConnnectionThread::open(40_000, 41_000)?.start()?;
             self.comms = Some(comms);
-            Ok(())
         }
+        Ok(())
     }
 
     pub fn local_friendcode_str(&self) -> String {

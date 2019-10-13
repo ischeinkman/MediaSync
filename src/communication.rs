@@ -200,27 +200,31 @@ impl ConnnectionThread {
             .message_channel
             .as_ref()
             .ok_or_else(|| "No message channel found for comms thread!")?;
-        let msg = channel.try_recv();
-        match msg {
-            Ok(ConnectionMessage::ConnectRemote(addr)) => {
-                println!("Trying to connect to addr {:?}", addr);
-                let connection = std::net::TcpStream::connect(addr).unwrap();
-                connection.set_nonblocking(true).unwrap();
-                self.client_connections.push(connection);
-                self.client_addresses.write().unwrap().push(addr);
-                Ok(())
-            }
-            Ok(ConnectionMessage::OpenPublic) => {
-                let mut addr_lock = self.public_addr.write().unwrap();
-                if addr_lock.is_none() {
-                    let new_public_addr = PublicAddr::request_public(local_addr)?;
-                    *addr_lock = Some(new_public_addr);
+        loop {
+            let msg = channel.try_recv();
+            match msg {
+                Ok(ConnectionMessage::ConnectRemote(addr)) => {
+                    println!("Trying to connect to addr {:?}", addr);
+                    let connection = std::net::TcpStream::connect(addr).unwrap();
+                    connection.set_nonblocking(true).unwrap();
+                    self.client_connections.push(connection);
+                    self.client_addresses.write().unwrap().push(addr);
                 }
-                Ok(())
+                Ok(ConnectionMessage::OpenPublic) => {
+                    let mut addr_lock = self.public_addr.write().unwrap();
+                    if addr_lock.is_none() {
+                        let new_public_addr = PublicAddr::request_public(local_addr)?;
+                        *addr_lock = Some(new_public_addr);
+                    }
+                }
+                Ok(ConnectionMessage::Ping) => {}
+                Err(mpsc::TryRecvError::Empty) => {
+                    break Ok(());
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break Err(mpsc::TryRecvError::Disconnected.into());
+                }
             }
-            Ok(ConnectionMessage::Ping) => Ok(()),
-            Err(mpsc::TryRecvError::Empty) => Ok(()),
-            Err(mpsc::TryRecvError::Disconnected) => Err(mpsc::TryRecvError::Disconnected.into()),
         }
     }
     pub fn start(mut self) -> MyResult<ConnectionsThreadHandle> {
@@ -246,20 +250,9 @@ impl ConnnectionThread {
                 MyResult::<()>::Err(e).unwrap();
             }
 
-            if !self.client_connections.is_empty() || !self.host_connections.is_empty() {}
-            let valid_client_connections =
-                self.client_connections.iter_mut().filter_map(|stream| {
-                    let addr_opt = validate_connection(stream).unwrap();
-                    addr_opt.map(|addr| (addr, stream))
-                });
-
             let mut client_events = Vec::new();
-            for (addr, stream) in valid_client_connections {
-                let buffer = self
-                    .stream_buffers
-                    .entry(addr)
-                    .or_insert_with(MessageBuffer::new);
-                let cur_events = stream_event_iter(stream, buffer).map(|res| res.unwrap());
+            for stream in self.client_connections.iter_mut() {
+                let cur_events = collect_stream_events(stream, &mut self.stream_buffers).unwrap();
                 client_events.extend(cur_events);
             }
 
@@ -270,17 +263,9 @@ impl ConnnectionThread {
                 .flat_map(|channel| channel.try_iter())
                 .collect();
 
-            let valid_host_connections = self.host_connections.iter_mut().filter_map(|stream| {
-                let addr_opt = validate_connection(stream).unwrap();
-                addr_opt.map(|addr| (addr, stream))
-            });
             let mut host_events = Vec::new();
-            for (addr, stream) in valid_host_connections {
-                let buffer = self
-                    .stream_buffers
-                    .entry(addr)
-                    .or_insert_with(MessageBuffer::new);
-                let cur_events = stream_event_iter(stream, buffer).map(|res| res.unwrap());
+            for stream in self.host_connections.iter_mut() {
+                let cur_events = collect_stream_events(stream, &mut self.stream_buffers).unwrap();
                 host_events.extend(cur_events);
             }
 
@@ -314,10 +299,8 @@ impl ConnnectionThread {
                         .client_connections
                         .iter_mut()
                         .chain(self.host_connections.iter_mut());
-                    let valid_streams = all_streams.filter_map(|stream| {
-                        let addr_opt = validate_connection(stream).unwrap();
-                        addr_opt.map(|_| stream)
-                    });
+                    let valid_streams =
+                        all_streams.filter(|stream| validate_connection(stream).unwrap().is_some());
                     for stream in valid_streams {
                         stream.write_all(block.as_bytes()).unwrap();
                     }
@@ -382,6 +365,17 @@ struct StreamEventIter<'a, 'b> {
     buffer: &'b mut MessageBuffer,
 }
 
+impl<'a, 'b> StreamEventIter<'a, 'b> {
+    pub fn from_buffer_map(
+        stream: &'a mut TcpStream,
+        buffers: &'b mut HashMap<SocketAddr, MessageBuffer>,
+    ) -> io::Result<Self> {
+        let addr = stream.peer_addr()?;
+        let buffer = buffers.entry(addr).or_insert_with(MessageBuffer::new);
+        Ok(Self { stream, buffer })
+    }
+}
+
 impl<'a, 'b> Iterator for StreamEventIter<'a, 'b> {
     type Item = MyResult<RemoteEvent>;
     fn next(&mut self) -> Option<MyResult<RemoteEvent>> {
@@ -393,11 +387,15 @@ impl<'a, 'b> Iterator for StreamEventIter<'a, 'b> {
     }
 }
 
-fn stream_event_iter<'a, 'b>(
-    stream: &'a mut TcpStream,
-    buffer: &'b mut MessageBuffer,
-) -> StreamEventIter<'a, 'b> {
-    StreamEventIter { stream, buffer }
+fn collect_stream_events(
+    stream: &mut TcpStream,
+    buffers: &mut HashMap<SocketAddr, MessageBuffer>,
+) -> MyResult<Vec<RemoteEvent>> {
+    match StreamEventIter::from_buffer_map(stream, buffers) {
+        Ok(itr) => itr.collect(),
+        Err(ref e) if is_disconnection_error(e) => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn filter_lower_events(
@@ -437,9 +435,16 @@ fn filter_lower_events(
 fn validate_connection(stream: &TcpStream) -> MyResult<Option<SocketAddr>> {
     match stream.peer_addr() {
         Ok(addr) => Ok(Some(addr)),
-        Err(ref e) if e.kind() == io::ErrorKind::NotConnected => Ok(None),
-        Err(ref e) if e.kind() == io::ErrorKind::ConnectionAborted => Ok(None),
-        Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => Ok(None),
+        Err(ref e) if is_disconnection_error(e) => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+fn is_disconnection_error(e: &io::Error) -> bool {
+    match e.kind() {
+        io::ErrorKind::NotConnected => true,
+        io::ErrorKind::ConnectionAborted => true,
+        io::ErrorKind::ConnectionReset => true,
+        _ => false,
     }
 }
