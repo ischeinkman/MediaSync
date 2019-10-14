@@ -1,5 +1,4 @@
-use crate::events::PlayerEvent;
-use crate::events::TimePing;
+use crate::players::events::{PlayerEvent, TimePing};
 use crate::traits::{MediaPlayer, MediaPlayerList};
 use crate::{DebugError, MyResult};
 use mpris;
@@ -13,6 +12,7 @@ pub struct MprisPlayerHandle<'a> {
     name: String,
     player: mpris::Player<'a>,
     previous_status: Option<PlayerStatus>,
+    unprocessed_events: Vec<PlayerEvent>,
 }
 
 pub struct PlayerStatus {
@@ -20,16 +20,54 @@ pub struct PlayerStatus {
     track_id: Option<mpris::TrackID>,
     track_url: Option<String>,
     position: Duration,
-    prev_events: Vec<PlayerEvent>,
 }
 
-impl PlayerStatus {
-    pub fn abs_time_diff(&self, other: &PlayerStatus) -> Duration {
-        if self.position > other.position {
-            self.position - other.position
+use std::cmp::PartialOrd;
+use std::ops::Sub;
+trait AbsDiff<Rhs = Self>: Sub<Rhs> + PartialOrd<Rhs> + Sized
+where
+    Rhs: Sub<Self, Output = Self::Output>,
+{
+    fn abs_diff(self, other: Rhs) -> Self::Output {
+        if self > other {
+            self - other
         } else {
-            other.position - self.position
+            other - self
         }
+    }
+}
+
+impl<T: Sub<Rhs> + PartialOrd<Rhs> + Sized, Rhs: Sub<T, Output = T::Output>> AbsDiff<Rhs> for T {}
+
+impl PlayerStatus {
+    pub fn events_since(&self, dt: Duration, previous: Option<&PlayerStatus>) -> Vec<PlayerEvent> {
+        let mut retvl = Vec::new();
+        let prev_url = previous.and_then(|p| p.track_url.as_ref());
+        if self.track_url.as_ref() != prev_url {
+            retvl.push(PlayerEvent::MediaOpen(
+                self.track_url.as_ref().cloned().unwrap_or_else(String::new),
+            ));
+        }
+        let needs_jump = previous.map_or(true, |prev| {
+            if prev.position > self.position {
+                true
+            } else if self.is_paused {
+                self.position.abs_diff(prev.position) > JUMP_ERROR_MARGIN
+            } else {
+                self.position.abs_diff(prev.position + dt) > JUMP_ERROR_MARGIN
+            }
+        });
+        if needs_jump {
+            retvl.push(PlayerEvent::Jump(self.position));
+        }
+        if previous.map_or(true, |p| p.is_paused != self.is_paused) {
+            if self.is_paused {
+                retvl.push(PlayerEvent::Pause);
+            } else {
+                retvl.push(PlayerEvent::Play);
+            }
+        }
+        retvl
     }
 }
 
@@ -40,6 +78,7 @@ impl<'a> MprisPlayerHandle<'a> {
             name: player.identity().to_owned(),
             player,
             previous_status: None,
+            unprocessed_events: Vec::new(),
         };
         Ok(retvl)
     }
@@ -63,9 +102,7 @@ impl<'a> MprisPlayerHandle<'a> {
         let track_url: Option<String> = self
             .player
             .get_metadata()
-            .map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("mpris::MetadataError: {:?}", e))
-            })?
+            .map_err(|e| format!("mpris::MetadataError: {:?}", e))?
             .url()
             .map(|s| s.to_owned());
         Ok(PlayerStatus {
@@ -73,7 +110,6 @@ impl<'a> MprisPlayerHandle<'a> {
             track_id,
             position,
             track_url,
-            prev_events: Vec::new(),
         })
     }
 }
@@ -84,7 +120,7 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
     }
     fn send_event(&mut self, msg: PlayerEvent) -> MyResult<()> {
         match msg {
-            PlayerEvent::Jump(time) => {
+            PlayerEvent::Jump(ref time) => {
                 println!("Trying to jump to {}", time.as_millis());
                 let current_track_id = match self.current_trackid()? {
                     Some(t) => t,
@@ -97,39 +133,26 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
                     .map_err(DebugError::into_myerror)?;
                 crate::debug_print(format!("And I love you"));
                 self.player.play().map_err(DebugError::into_myerror)?;
-                if let Some(prev) = self.previous_status.as_mut() {
-                    prev.position = time;
-                }
 
                 println!("Finished jump?");
             }
             PlayerEvent::Pause => {
                 crate::debug_print(format!("Player got paused."));
                 self.player.pause().map_err(DebugError::into_myerror)?;
-                if let Some(prev) = self.previous_status.as_mut() {
-                    prev.is_paused = true;
-                }
             }
             PlayerEvent::Play => {
                 crate::debug_print(format!("Player got played."));
                 self.player.play().map_err(DebugError::into_myerror)?;
-                if let Some(prev) = self.previous_status.as_mut() {
-                    prev.is_paused = false;
-                }
             }
-            PlayerEvent::MediaOpen(url) => {
+            PlayerEvent::MediaOpen(ref url) => {
                 crate::debug_print(format!("Player got open: {}.", url));
                 self.player
                     .add_track_at_start(&url, true)
                     .map_err(DebugError::into_myerror)?;
-                let new_id = self.current_trackid()?;
-                if let Some(prev) = self.previous_status.as_mut() {
-                    prev.track_url = Some(url);
-                    prev.track_id = new_id;
-                }
             }
             _ => unimplemented!(),
         }
+        self.unprocessed_events.push(msg);
         Ok(())
     }
 
@@ -178,99 +201,42 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
     }
 
     fn check_events(&mut self, time_since_previous: Duration) -> MyResult<Vec<PlayerEvent>> {
-        crate::debug_print(format!("{}: Start check_events", self.name,));
         if !self.player.is_running() {
-            crate::debug_print(format!("{}: Found shutdown in check_events", self.name,));
             return Ok(vec![PlayerEvent::Shutdown]);
         }
-        let mut retvl = Vec::new();
-        let mut current_status = self.current_status()?;
-        crate::debug_print(format!("{}: Got status in check_events", self.name,));
-        let prev_status_lock = &mut self.previous_status;
-        crate::debug_print(format!(
-            "{}: Got prev_status_lock in check_events",
-            self.name,
-        ));
-        let has_prev_media_change = prev_status_lock
-            .as_ref()
-            .map(|p| {
-                p.prev_events.iter().any(|evt| match evt {
-                    PlayerEvent::MediaOpen(_) => true,
-                    _ => false,
-                })
+        let current_status = self.current_status()?;
+        let raw_evts =
+            current_status.events_since(time_since_previous, self.previous_status.as_ref());
+        let retvl = raw_evts
+            .into_iter()
+            .filter(|evt| match evt {
+                PlayerEvent::Pause => !self
+                    .unprocessed_events
+                    .iter()
+                    .any(|evt| evt == &PlayerEvent::Pause),
+                PlayerEvent::Play => !self
+                    .unprocessed_events
+                    .iter()
+                    .any(|evt| evt == &PlayerEvent::Play),
+                PlayerEvent::Jump(_) => !self.unprocessed_events.iter().any(|evt| {
+                    if let PlayerEvent::Jump(_) = *evt {
+                        true
+                    } else {
+                        false
+                    }
+                }),
+                PlayerEvent::MediaOpen(_) => !self.unprocessed_events.iter().any(|evt| {
+                    if let PlayerEvent::MediaOpen(_) = *evt {
+                        true
+                    } else {
+                        false
+                    }
+                }),
+                _ => true,
             })
-            .unwrap_or(false);
-        crate::debug_print(format!(
-            "{}: Got has_prev_media_change in check_events",
-            self.name,
-        ));
-        if !has_prev_media_change {
-            match prev_status_lock.as_ref() {
-                Some(prev_status) if current_status.track_url == prev_status.track_url => {}
-                _ => {
-                    let url = current_status
-                        .track_url
-                        .as_ref()
-                        .cloned()
-                        .unwrap_or_else(|| "".to_owned());
-                    retvl.push(PlayerEvent::MediaOpen(url.clone()));
-                    let current_id = current_status.track_id.clone();
-                    let prev_id = prev_status_lock
-                        .as_ref()
-                        .and_then(|t| t.track_id.as_ref().cloned());
-                    crate::debug_print(format!("Player sending url {}", url));
-                    crate::debug_print(format!("    ID change: {:?} => {:?}", prev_id, current_id));
-                }
-            }
-        }
-        crate::debug_print(format!(
-            "{}: Built media change evt in check_events",
-            self.name,
-        ));
-        let dt = prev_status_lock
-            .as_ref()
-            .map(|prev_status| current_status.abs_time_diff(&prev_status))
-            .unwrap_or(current_status.position);
-        crate::debug_print(format!("{}: Got dt in check_events", self.name,));
-        let dt_error = if dt > time_since_previous {
-            dt - time_since_previous
-        } else {
-            time_since_previous - dt
-        };
-        crate::debug_print(format!("{}: Got dt_error in check_events", self.name,));
-        if dt_error > JUMP_ERROR_MARGIN {
-            retvl.push(PlayerEvent::Jump(current_status.position));
-            crate::debug_print(format!(
-                "{}: Player sending Jump {}",
-                self.name,
-                current_status.position.as_millis()
-            ));
-        }
-        crate::debug_print(format!("{}: Built jump evt in check_events", self.name,));
-        let play_status_change = prev_status_lock
-            .as_ref()
-            .map(|prev_status| prev_status.is_paused != current_status.is_paused)
-            .unwrap_or(true);
-        crate::debug_print(format!(
-            "{}: Got play_status_change in check_events",
-            self.name,
-        ));
-        if play_status_change {
-            if current_status.is_paused {
-                retvl.push(PlayerEvent::Pause);
-                crate::debug_print(format!("Player sending Pause"));
-            } else {
-                retvl.push(PlayerEvent::Play);
-                crate::debug_print(format!("Player sending Play"));
-            }
-        }
-        crate::debug_print(format!(
-            "{}: Built play status evt in check_events",
-            self.name,
-        ));
-        current_status.prev_events = retvl.clone();
-        *prev_status_lock = Some(current_status);
-        crate::debug_print(format!("{}: End check_events", self.name,));
+            .collect();
+        self.previous_status = Some(current_status);
+        self.unprocessed_events.clear();
         Ok(retvl)
     }
 }

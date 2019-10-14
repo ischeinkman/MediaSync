@@ -1,40 +1,6 @@
+use crate::players::events::{PlayerEvent, TimePing};
 use crate::MyResult;
 use std::time::Duration;
-
-#[derive(Clone, Eq, PartialEq, Debug, Hash)]
-pub enum PlayerEvent {
-    Pause,
-    Play,
-    Jump(Duration),
-    MediaOpen(String),
-    Shutdown,
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
-pub struct TimePing {
-    time: Duration,
-}
-
-impl TimePing {
-    pub fn from_micros(micros: u64) -> TimePing {
-        Duration::from_micros(micros).into()
-    }
-    pub fn from_duration(time: Duration) -> TimePing {
-        TimePing { time }
-    }
-    pub fn as_micros(&self) -> u64 {
-        self.time.as_micros() as u64
-    }
-    pub fn time(&self) -> Duration {
-        self.time
-    }
-}
-
-impl From<Duration> for TimePing {
-    fn from(time: Duration) -> TimePing {
-        TimePing { time }
-    }
-}
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RemoteEvent {
@@ -52,19 +18,127 @@ pub enum RemoteEvent {
     Shutdown,
 }
 
+#[derive(Eq, PartialEq, Hash, Clone, Copy, Debug, Ord, PartialOrd)]
+pub enum RemoteEventKind {
+    Ping = 0,
+    Pause = 1,
+    Play = 2,
+    Jump = 3,
+    MediaOpen = 4,
+    RequestTransfer = 5,
+    RespondTransfer = 6,
+    MediaOpenOkay = 7,
+    Shutdown = 0xff,
+}
+
+impl RemoteEventKind {
+    pub fn parse_kind_byte(byte: u8) -> Option<RemoteEventKind> {
+        match byte & 0x7f {
+            0 => RemoteEventKind::Ping.into(),
+            1 => RemoteEventKind::Pause.into(),
+            2 => RemoteEventKind::Play.into(),
+            3 => RemoteEventKind::Jump.into(),
+            4 => RemoteEventKind::MediaOpen.into(),
+            5 => RemoteEventKind::RequestTransfer.into(),
+            6 => RemoteEventKind::RespondTransfer.into(),
+            7 => RemoteEventKind::MediaOpenOkay.into(),
+            0x7f => RemoteEventKind::Shutdown.into(),
+            _ => None,
+        }
+    }
+
+    pub fn is_multiblock(self) -> bool {
+        match self {
+            RemoteEventKind::MediaOpen => true,
+            RemoteEventKind::RequestTransfer => true,
+            RemoteEventKind::MediaOpenOkay => true,
+            _ => false,
+        }
+    }
+}
+impl From<RemoteEventKind> for u8 {
+    fn from(kind: RemoteEventKind) -> u8 {
+        kind as u8
+    }
+}
+
 impl RemoteEvent {
+    pub fn kind(&self) -> RemoteEventKind {
+        match self {
+            RemoteEvent::Ping(_) => RemoteEventKind::Ping,
+            RemoteEvent::Pause => RemoteEventKind::Pause,
+            RemoteEvent::Play => RemoteEventKind::Play,
+            RemoteEvent::Jump(_) => RemoteEventKind::Jump,
+            RemoteEvent::MediaOpen(_) => RemoteEventKind::MediaOpen,
+            RemoteEvent::RequestTransfer(_) => RemoteEventKind::RequestTransfer,
+            RemoteEvent::RespondTransfer { .. } => RemoteEventKind::RespondTransfer,
+            RemoteEvent::MediaOpenOkay(_) => RemoteEventKind::MediaOpenOkay,
+            RemoteEvent::Shutdown => RemoteEventKind::Shutdown,
+        }
+    }
+    pub fn parse_block(next: RawBlock) -> Option<Self> {
+        let kind = next.kind()?;
+        if kind.is_multiblock() {
+            return None;
+        }
+        match kind {
+            RemoteEventKind::Ping => {
+                (Some(RemoteEvent::Ping(TimePing::from_micros(next.count_u64()))))
+            }
+            RemoteEventKind::Pause => (Some(RemoteEvent::Pause)),
+            RemoteEventKind::Play => (Some(RemoteEvent::Play)),
+            RemoteEventKind::Jump => {
+                (Some(RemoteEvent::Jump(Duration::from_micros(next.count_u64()))))
+            }
+            RemoteEventKind::RespondTransfer => {
+                let size = next.count_u64();
+                let code_slice = &next.payload()[0..9];
+                let mut code_buffer = ['\0'; 9];
+                let valid =
+                    code_buffer
+                        .iter_mut()
+                        .zip(code_slice.iter())
+                        .all(|(buffer, &payload)| {
+                            let payload_char = char::from(payload);
+                            if payload_char.is_alphanumeric() {
+                                *buffer = payload_char;
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                if valid {
+                    Some(RemoteEvent::RespondTransfer {
+                        size,
+                        transfer_code: Some(code_buffer),
+                    })
+                } else {
+                    Some(RemoteEvent::RespondTransfer {
+                        size,
+                        transfer_code: None,
+                    })
+                }
+            }
+            RemoteEventKind::Shutdown => (Some(RemoteEvent::Shutdown)),
+            _ => unreachable!(),
+        }
+    }
     pub fn as_blocks(&self) -> Vec<RawBlock> {
         match self {
-            RemoteEvent::Ping(TimePing { time: tm }) => {
-                let timestamp = tm.as_micros() as u64;
-                let retvl = RawBlock::new().with_kind(0).with_count_u64(timestamp);
+            RemoteEvent::Ping(png) => {
+                let timestamp = png.as_micros();
+                let retvl = RawBlock::new()
+                    .with_kind(self.kind())
+                    .with_count_u64(timestamp);
                 vec![retvl]
             }
-            RemoteEvent::Pause => vec![RawBlock::new().with_kind(1)],
-            RemoteEvent::Play => vec![RawBlock::new().with_kind(2)],
+            RemoteEvent::Pause => vec![RawBlock::new().with_kind(self.kind())],
+            RemoteEvent::Play => vec![RawBlock::new().with_kind(self.kind())],
             RemoteEvent::Jump(tm) => {
                 let timestamp = tm.as_micros() as u64;
-                let retvl = RawBlock::new().with_kind(3).with_count_u64(timestamp);
+                let retvl = RawBlock::new()
+                    .with_kind(self.kind())
+                    .with_count_u64(timestamp);
                 vec![retvl]
             }
             RemoteEvent::MediaOpen(url) => {
@@ -72,10 +146,10 @@ impl RemoteEvent {
                 let url_len = string_bytes.len();
                 let bytes_iter = string_bytes.chunks(22).enumerate();
                 let blocks = bytes_iter.map(|(idx, bytes)| {
-                    let kind = if idx == 0 { 4 } else { 4 | 1 << 7 };
                     let length_or_idx = if idx == 0 { url_len as u64 } else { idx as u64 };
                     RawBlock::new()
-                        .with_kind(kind)
+                        .with_kind(self.kind())
+                        .with_append_flag(idx != 0)
                         .with_count_u64(length_or_idx)
                         .with_payload(bytes)
                 });
@@ -86,10 +160,10 @@ impl RemoteEvent {
                 let url_len = string_bytes.len();
                 let bytes_iter = string_bytes.chunks(22).enumerate();
                 let blocks = bytes_iter.map(|(idx, bytes)| {
-                    let kind = if idx == 0 { 5 } else { 5 | 1 << 7 };
                     let length_or_idx = if idx == 0 { url_len as u64 } else { idx as u64 };
                     RawBlock::new()
-                        .with_kind(kind)
+                        .with_kind(self.kind())
+                        .with_append_flag(idx != 0)
                         .with_count_u64(length_or_idx)
                         .with_payload(bytes)
                 });
@@ -99,7 +173,7 @@ impl RemoteEvent {
                 size,
                 transfer_code: Some(code),
             } => {
-                let mut retvl = RawBlock::new().with_kind(6).with_count_u64(*size);
+                let mut retvl = RawBlock::new().with_kind(self.kind()).with_count_u64(*size);
                 for (idx, c) in code.iter().enumerate() {
                     retvl.data[10 + idx] = *c as u8;
                 }
@@ -110,10 +184,10 @@ impl RemoteEvent {
                 let url_len = string_bytes.len();
                 let bytes_iter = string_bytes.chunks(22).enumerate();
                 let blocks = bytes_iter.map(|(idx, bytes)| {
-                    let kind = if idx == 0 { 7 } else { 7 | 1 << 7 };
                     let length_or_idx = if idx == 0 { url_len as u64 } else { idx as u64 };
                     RawBlock::new()
-                        .with_kind(kind)
+                        .with_kind(self.kind())
+                        .with_append_flag(idx != 0)
                         .with_count_u64(length_or_idx)
                         .with_payload(bytes)
                 });
@@ -145,36 +219,60 @@ impl From<TimePing> for RemoteEvent {
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
 pub struct RawBlock {
-    data: [u8; 32],
+    data: [u8; RawBlock::BLOCK_SIZE],
 }
 impl RawBlock {
-    pub const PAYLOAD_SIZE: usize = 32 - 10;
+    const APPEND_FLAG: u8 = 1 << 7;
+    const PAYLOAD_START: usize = 10;
+    pub const PAYLOAD_SIZE: usize = Self::BLOCK_SIZE - Self::PAYLOAD_START;
+    pub const BLOCK_SIZE: usize = 32;
     pub fn new() -> Self {
-        RawBlock { data: [0; 32] }
+        RawBlock {
+            data: [0; RawBlock::BLOCK_SIZE],
+        }
     }
-    pub fn with_kind(mut self, kind_byte: u8) -> Self {
-        self.data[0] = kind_byte;
+    pub fn with_kind(mut self, kind: RemoteEventKind) -> Self {
+        self.data[0] = u8::from(kind);
+        self
+    }
+    pub fn with_append_flag(mut self, is_append: bool) -> Self {
+        let cur_kind = self.data[0];
+        let next_kind = if is_append {
+            cur_kind | Self::APPEND_FLAG
+        } else {
+            cur_kind & !(Self::APPEND_FLAG)
+        };
+        self.data[0] = next_kind;
         self
     }
     pub fn with_count_u64(mut self, count: u64) -> Self {
         let count_bytes = count.to_le_bytes();
-        let relevant_portion = &mut self.data[2..10];
+        let relevant_portion = &mut self.data[2..Self::PAYLOAD_START];
         relevant_portion.copy_from_slice(&count_bytes);
         self
     }
 
     pub fn with_payload(mut self, payload: &[u8]) -> Self {
         let mylen = Self::PAYLOAD_SIZE;
-        let self_payload = &mut self.data[10..10 + mylen.min(payload.len())];
+        let self_payload =
+            &mut self.data[Self::PAYLOAD_START..Self::PAYLOAD_START + mylen.min(payload.len())];
         self_payload.copy_from_slice(payload);
         self
     }
-    pub fn from_data(data: [u8; 32]) -> Self {
+    pub fn from_data(data: [u8; RawBlock::BLOCK_SIZE]) -> Self {
         Self { data }
     }
 
-    pub fn kind(&self) -> u8 {
+    pub fn kind(&self) -> Option<RemoteEventKind> {
+        RemoteEventKind::parse_kind_byte(self.kind_byte() & !RawBlock::APPEND_FLAG)
+    }
+
+    pub fn kind_byte(&self) -> u8 {
         self.data[0]
+    }
+
+    pub fn is_append(&self) -> bool {
+        self.kind_byte() & Self::APPEND_FLAG != 0
     }
 
     pub fn count_u64(&self) -> u64 {
@@ -198,6 +296,39 @@ impl RawBlock {
     pub fn as_bytes(&self) -> &[u8] {
         &self.data
     }
+
+    pub fn into_payload(self) -> [u8; Self::PAYLOAD_SIZE] {
+        let mut retvl = [0; Self::PAYLOAD_SIZE];
+        (&mut retvl).copy_from_slice(self.payload());
+        retvl
+    }
+}
+
+pub struct ArrayIter<Item: Copy, Array: AsRef<[Item]>> {
+    arr: Array,
+    idx: usize,
+    _phantom: std::marker::PhantomData<Item>,
+}
+impl<Item: Copy, Array: AsRef<[Item]>> ArrayIter<Item, Array> {
+    pub fn new(arr: Array) -> Self {
+        ArrayIter {
+            arr,
+            idx: 0,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<Item: Copy, Array: AsRef<[Item]>> Iterator for ArrayIter<Item, Array> {
+    type Item = Item;
+    fn next(&mut self) -> Option<Item> {
+        let arr = self.arr.as_ref();
+        let retvl = arr.get(self.idx).copied();
+        if retvl.is_some() {
+            self.idx += 1;
+        }
+        retvl
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, Default)]
@@ -210,14 +341,45 @@ impl BlockParser {
         BlockParser { buffer: Vec::new() }
     }
 
+    fn parse_buffer(&mut self) -> MyResult<Option<RemoteEvent>> {
+        let header = match self.buffer.first().copied() {
+            Some(h) => h,
+            None => unreachable!(),
+        };
+        let buffer_kind = header.kind().unwrap_or(RemoteEventKind::Shutdown);
+        let string_length = header.count_u64();
+        let current_bytes = (self.buffer.len() * RawBlock::PAYLOAD_SIZE) as u64;
+        if current_bytes < string_length {
+            return Ok(None);
+        }
+        let bytes: Vec<_> = self
+            .buffer
+            .drain(..)
+            .flat_map(|block| ArrayIter::new(block.into_payload()))
+            .take(string_length as usize)
+            .collect();
+        let msg = String::from_utf8(bytes)?;
+        match buffer_kind {
+            RemoteEventKind::MediaOpen => Ok(Some(RemoteEvent::MediaOpen(msg))),
+            RemoteEventKind::RequestTransfer => Ok(Some(RemoteEvent::RequestTransfer(msg))),
+            RemoteEventKind::MediaOpenOkay => Ok(Some(RemoteEvent::MediaOpenOkay(msg))),
+            _ => Err(format!(
+                "Error: got invalid kind {:x} for string message {}",
+                header.kind_byte(),
+                msg
+            )
+            .into()),
+        }
+    }
+
     pub fn parse_next(&mut self, next: RawBlock) -> MyResult<Option<RemoteEvent>> {
-        if !self.buffer.is_empty() {
-            let buffer_kind = self.buffer.first().map(|b| b.kind()).unwrap_or(0);
-            let next_kind = next.kind();
-            if next_kind != buffer_kind | 1 << 7 {
+        if let Some(header) = self.buffer.first().copied() {
+            let buffer_kind = header.kind().unwrap_or(RemoteEventKind::Shutdown);
+            if next.kind() != Some(buffer_kind) || !next.is_append() {
                 return Err(format!(
                     "Error parsing block: got kind {:x} in the middle of chain for block type {:x}",
-                    next_kind, buffer_kind
+                    next.kind_byte(),
+                    u8::from(buffer_kind)
                 )
                 .into());
             }
@@ -231,87 +393,23 @@ impl BlockParser {
                 .into());
             }
             self.buffer.push(next);
-
-            let string_length = self.buffer.first().map(|b| b.count_u64()).unwrap_or(0);
-            let total_expected = 1 + string_length / (RawBlock::PAYLOAD_SIZE as u64);
-            if self.buffer.len() as u64 == total_expected {
-                let mut moved_buffer = Vec::new();
-                std::mem::swap(&mut self.buffer, &mut moved_buffer);
-                let (kind, length) = moved_buffer
-                    .first()
-                    .map(|b| (b.kind(), b.count_u64()))
-                    .unwrap_or((0, 0));
-                let mut bytes = Vec::new();
-                for block in moved_buffer.into_iter() {
-                    bytes.extend_from_slice(block.payload());
-                }
-                bytes.resize(length as usize, 0);
-                let msg = String::from_utf8(bytes)?;
-                match kind {
-                    4 => Ok(Some(RemoteEvent::MediaOpen(msg))),
-                    5 => Ok(Some(RemoteEvent::RequestTransfer(msg))),
-                    7 => Ok(Some(RemoteEvent::MediaOpenOkay(msg))),
-                    e => Err(
-                        format!("Error: got invalid kind {:x} for string message {}", e, msg)
-                            .into(),
-                    ),
-                }
-            } else {
-                Ok(None)
-            }
+            self.parse_buffer()
         } else {
             match next.kind() {
-                0 => Ok(Some(RemoteEvent::Ping(TimePing::from_micros(
-                    next.count_u64(),
-                )))),
-                1 => Ok(Some(RemoteEvent::Pause)),
-                2 => Ok(Some(RemoteEvent::Play)),
-                3 => Ok(Some(RemoteEvent::Jump(Duration::from_micros(
-                    next.count_u64(),
-                )))),
-                4 => {
+                Some(kind) if kind.is_multiblock() => {
                     self.buffer.push(next);
-                    Ok(None)
+                    self.parse_buffer()
                 }
-                5 => {
-                    self.buffer.push(next);
-                    Ok(None)
+                Some(kind) if !kind.is_multiblock() => {
+                    RemoteEvent::parse_block(next).map(Some).ok_or_else(|| {
+                        format!("Error: bad block parse: {:x?}", next.as_bytes()).into()
+                    })
                 }
-                6 => {
-                    let size = next.count_u64();
-                    let code_slice = &next.payload()[0..9];
-                    let mut code_buffer = ['\0'; 9];
-                    let valid =
-                        code_buffer
-                            .iter_mut()
-                            .zip(code_slice.iter())
-                            .all(|(buffer, &payload)| {
-                                let payload_char = char::from(payload);
-                                if payload_char.is_alphanumeric() {
-                                    *buffer = payload_char;
-                                    true
-                                } else {
-                                    false
-                                }
-                            });
-                    if valid {
-                        Ok(Some(RemoteEvent::RespondTransfer {
-                            size,
-                            transfer_code: Some(code_buffer),
-                        }))
-                    } else {
-                        Ok(Some(RemoteEvent::RespondTransfer {
-                            size,
-                            transfer_code: None,
-                        }))
-                    }
-                }
-                7 => {
-                    self.buffer.push(next);
-                    Ok(None)
-                }
-                0xff => Ok(Some(RemoteEvent::Shutdown)),
-                other => Err(format!("Error: got invalid initial event kind {:x}", other).into()),
+                _ => Err(format!(
+                    "Error: got invalid initial event kind {:x}",
+                    next.kind_byte()
+                )
+                .into()),
             }
         }
     }
@@ -327,7 +425,7 @@ mod tests {
         let ping = RemoteEvent::Ping(TimePing::from_micros(ping_time));
         let mut ping_raw = ping.as_blocks();
         assert_eq!(1, ping_raw.len());
-        assert_eq!(0, ping_raw[0].kind());
+        assert_eq!(Some(RemoteEventKind::Ping), ping_raw[0].kind());
         assert_eq!(ping_time, ping_raw[0].count_u64());
 
         let parsed = parser.parse_next(ping_raw.pop().unwrap()).unwrap().unwrap();

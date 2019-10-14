@@ -1,8 +1,9 @@
 use crate::communication::{
     ConnectionsThreadHandle, ConnnectionThread, FileTransferClient, FileTransferHost, FriendCodeV4,
 };
-use crate::events::{PlayerEvent, RemoteEvent};
+use crate::events::{RemoteEvent};
 use crate::players;
+use crate::players::events::PlayerEvent;
 use crate::traits::MediaPlayer;
 use crate::{DebugError, MyResult};
 use std::net::SocketAddr;

@@ -1,5 +1,6 @@
 mod debug;
 mod mprisplayer;
+pub mod events;
 
 use crate::traits::{MediaPlayer, MediaPlayerList};
 use crate::MyResult;

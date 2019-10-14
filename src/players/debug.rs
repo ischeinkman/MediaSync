@@ -1,4 +1,4 @@
-use crate::events::{PlayerEvent, TimePing};
+use crate::players::events::{PlayerEvent, TimePing};
 use crate::traits::{MediaPlayer, MediaPlayerList};
 use crate::MyResult;
 
