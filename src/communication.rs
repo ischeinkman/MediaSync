@@ -2,9 +2,10 @@ use crate::events;
 use crate::events::RemoteEvent;
 use crate::DebugError;
 use crate::MyResult;
+
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
@@ -249,50 +250,50 @@ impl ConnnectionThread {
                 crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
                 MyResult::<()>::Err(e).unwrap();
             }
-
-            let mut client_events = Vec::new();
+            let mut raw_events = Vec::new();
             for stream in self.client_connections.iter_mut() {
                 let cur_events = collect_stream_events(stream, &mut self.stream_buffers).unwrap();
-                client_events.extend(cur_events);
+                raw_events.push((stream.peer_addr().unwrap(), cur_events));
             }
 
-            let self_events: Vec<_> = self
+            let mut self_events = PlayerEventGroup::new();
+            for evt in self
                 .event_channel
                 .as_ref()
                 .into_iter()
                 .flat_map(|channel| channel.try_iter())
-                .collect();
-
-            let mut host_events = Vec::new();
+            {
+                self_events = self_events.with_event(evt);
+            }
+            let my_ip = if let Some(ref addr) = self.public_addr.read().unwrap().as_ref() {
+                addr.addr()
+            } else {
+                self.listener.local_addr().unwrap()
+            };
             for stream in self.host_connections.iter_mut() {
                 let cur_events = collect_stream_events(stream, &mut self.stream_buffers).unwrap();
-                host_events.extend(cur_events);
+                raw_events.push((stream.peer_addr().unwrap(), cur_events));
             }
 
-            let relevant_client_events = client_events.clone();
-            let relevant_self_events =
-                filter_lower_events(self_events.clone(), client_events.clone());
-            let relevant_host_events = filter_lower_events(
-                host_events,
-                client_events.iter().chain(self_events.iter()).cloned(),
-            );
+            let mut rectified_self = self_events.clone();
+            let mut cascaded_remotes = raw_events
+                .first()
+                .cloned()
+                .map(|(_, evt)| evt)
+                .unwrap_or_default();
 
-            let mut jumped = false;
-            for evt in relevant_host_events {
-                if let RemoteEvent::Jump(_) = evt {
-                    jumped = true;
-                }
-                self.event_recv.as_ref().unwrap().send(evt.clone()).unwrap();
+            for (addr, group) in raw_events.iter_mut() {
+                *group = group.clone().rectify(*addr, &rectified_self, my_ip);
+                rectified_self = rectified_self.rectify(my_ip, group, *addr);
+                cascaded_remotes = cascaded_remotes.cascade(my_ip, group, *addr);
+            }
+            for (addr, group) in raw_events.iter_mut() {
+                *group = group.clone().rectify(*addr, &rectified_self, my_ip);
+                rectified_self = rectified_self.rectify(my_ip, group, *addr);
+                cascaded_remotes = cascaded_remotes.cascade(my_ip, group, *addr);
             }
 
-            for evt in relevant_self_events {
-                if let RemoteEvent::Jump(_) = evt {
-                    jumped = true;
-                } else if let RemoteEvent::Ping(_) = evt {
-                    if jumped {
-                        continue;
-                    }
-                }
+            for evt in rectified_self.into_events() {
                 let event_blocks = evt.as_blocks();
                 for block in event_blocks {
                     let all_streams = self
@@ -306,14 +307,7 @@ impl ConnnectionThread {
                     }
                 }
             }
-            for evt in relevant_client_events {
-                if let RemoteEvent::Jump(_) = evt {
-                    jumped = true;
-                } else if let RemoteEvent::Ping(_) = evt {
-                    if jumped {
-                        continue;
-                    }
-                }
+            for evt in cascaded_remotes.into_events() {
                 self.event_recv.as_ref().unwrap().send(evt.clone()).unwrap();
             }
 
@@ -390,46 +384,18 @@ impl<'a, 'b> Iterator for StreamEventIter<'a, 'b> {
 fn collect_stream_events(
     stream: &mut TcpStream,
     buffers: &mut HashMap<SocketAddr, MessageBuffer>,
-) -> MyResult<Vec<RemoteEvent>> {
+) -> MyResult<PlayerEventGroup> {
     match StreamEventIter::from_buffer_map(stream, buffers) {
-        Ok(itr) => itr.collect(),
-        Err(ref e) if is_disconnection_error(e) => Ok(Vec::new()),
+        Ok(itr) => {
+            let mut retvl = PlayerEventGroup::new();
+            for evt in itr {
+                retvl = retvl.with_event(evt?);
+            }
+            Ok(retvl)
+        }
+        Err(ref e) if is_disconnection_error(e) => Ok(PlayerEventGroup::new()),
         Err(e) => Err(e.into()),
     }
-}
-
-fn filter_lower_events(
-    cur_events: impl IntoIterator<Item = RemoteEvent>,
-    previous_events: impl IntoIterator<Item = RemoteEvent>,
-) -> impl Iterator<Item = RemoteEvent> {
-    let mut prev_has_playpause = false;
-    let mut prev_has_jump = false;
-    let mut prev_has_ping = false;
-    let mut prev_has_mediaopen = false;
-    for prev in previous_events {
-        match prev {
-            RemoteEvent::Play | RemoteEvent::Pause => {
-                prev_has_playpause = true;
-            }
-            RemoteEvent::Jump(_) => {
-                prev_has_jump = true;
-            }
-            RemoteEvent::Ping(_) => {
-                prev_has_ping = true;
-            }
-            RemoteEvent::MediaOpen(_) => {
-                prev_has_mediaopen = true;
-            }
-            _ => {}
-        }
-    }
-    cur_events.into_iter().filter(move |evt| match evt {
-        RemoteEvent::Play | RemoteEvent::Pause => !prev_has_playpause,
-        RemoteEvent::Jump(_) => !prev_has_jump,
-        RemoteEvent::Ping(_) => !prev_has_jump && !prev_has_ping,
-        RemoteEvent::MediaOpen(_) => !prev_has_mediaopen,
-        _ => true,
-    })
 }
 
 fn validate_connection(stream: &TcpStream) -> MyResult<Option<SocketAddr>> {
@@ -446,5 +412,211 @@ fn is_disconnection_error(e: &io::Error) -> bool {
         io::ErrorKind::ConnectionAborted => true,
         io::ErrorKind::ConnectionReset => true,
         _ => false,
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+pub struct PlayerEventGroup {
+    media_open_event: Option<RemoteEvent>,
+    is_paused: Option<bool>,
+    did_jump: bool,
+    position: Option<Duration>,
+}
+
+impl Default for PlayerEventGroup {
+    fn default() -> Self {
+        PlayerEventGroup::new()
+    }
+}
+
+impl PlayerEventGroup {
+    pub fn new() -> Self {
+        PlayerEventGroup {
+            media_open_event: None,
+            is_paused: None,
+            did_jump: false,
+            position: None,
+        }
+    }
+
+    pub fn with_event(mut self, event: RemoteEvent) -> Self {
+        if let Some(RemoteEvent::MediaOpen(_)) = self.media_open_event {
+            return self;
+        }
+        match event {
+            RemoteEvent::Pause => self.is_paused = Some(true),
+            RemoteEvent::Play => self.is_paused = Some(false),
+            RemoteEvent::Jump(dt) => {
+                self.position = Some(dt);
+                self.did_jump = true;
+            }
+            RemoteEvent::MediaOpen(_) => {
+                return PlayerEventGroup::new().with_event(event);
+            }
+            RemoteEvent::MediaOpenOkay(_)
+            | RemoteEvent::RequestTransfer(_)
+            | RemoteEvent::RespondTransfer { .. } => {
+                self.media_open_event = Some(event);
+            }
+            RemoteEvent::Ping(png) => {
+                self.position.get_or_insert(png.time());
+            }
+            RemoteEvent::Shutdown => {
+                return PlayerEventGroup::new();
+            }
+        }
+        self
+    }
+
+    pub fn into_events(self) -> impl Iterator<Item = RemoteEvent> {
+        let status_event = self
+            .is_paused
+            .map(|paused| {
+                if paused {
+                    RemoteEvent::Pause
+                } else {
+                    RemoteEvent::Play
+                }
+            })
+            .into_iter();
+        let media_event = self.media_open_event.into_iter();
+        let position_event = if self.did_jump {
+            let pos = self.position.unwrap_or(Duration::from_micros(0));
+            Some(RemoteEvent::Jump(pos)).into_iter()
+        } else {
+            self.position
+                .map(|p| RemoteEvent::Ping(p.into()))
+                .into_iter()
+        };
+        media_event.chain(position_event).chain(status_event)
+    }
+
+    pub fn cascade(
+        self,
+        self_addr: SocketAddr,
+        other: &PlayerEventGroup,
+        other_addr: SocketAddr,
+    ) -> PlayerEventGroup {
+        let rectified_self = self.rectify(self_addr, other, other_addr);
+        PlayerEventGroup {
+            media_open_event: rectified_self.media_open_event,
+            is_paused: rectified_self.is_paused.or(other.is_paused),
+            did_jump: rectified_self.did_jump || other.did_jump,
+            position: rectified_self.position.or(other.position),
+        }
+    }
+
+    pub fn rectify(
+        self,
+        self_addr: SocketAddr,
+        other: &PlayerEventGroup,
+        other_addr: SocketAddr,
+    ) -> PlayerEventGroup {
+        let self_public = match self_addr.ip() {
+            IpAddr::V4(ip) => !ip.is_private(),
+            IpAddr::V6(_) => true,
+        };
+        let other_public = match other_addr.ip() {
+            IpAddr::V4(ip) => !ip.is_private(),
+            IpAddr::V6(_) => true,
+        };
+        let self_has_priority = if self_public && !other_public {
+            true
+        } else if !self_public && other_public {
+            false
+        } else {
+            let self_bytes: u128 = match self_addr.ip() {
+                IpAddr::V4(ip) => ip.to_ipv6_compatible().into(),
+                IpAddr::V6(ip) => ip.into(),
+            };
+            let other_bytes: u128 = match other_addr.ip() {
+                IpAddr::V4(ip) => ip.to_ipv6_compatible().into(),
+                IpAddr::V6(ip) => ip.into(),
+            };
+            if self_bytes != other_bytes {
+                self_bytes > other_bytes
+            } else {
+                self_addr.port() > other_addr.port()
+            }
+        };
+
+        match (
+            self.media_open_event.as_ref(),
+            other.media_open_event.as_ref(),
+        ) {
+            (Some(RemoteEvent::MediaOpen(ref self_url)), Some(RemoteEvent::MediaOpen(_))) => {
+                if self_has_priority {
+                    return PlayerEventGroup::new()
+                        .with_event(RemoteEvent::MediaOpen(self_url.clone()));
+                } else {
+                    return PlayerEventGroup::new();
+                }
+            }
+            (Some(RemoteEvent::MediaOpen(ref url)), _) => {
+                return PlayerEventGroup::new().with_event(RemoteEvent::MediaOpen(url.to_owned()));
+            }
+            (None, Some(RemoteEvent::MediaOpen(_))) => {
+                return PlayerEventGroup::new();
+            }
+            _ => {}
+        }
+
+        let mut retvl = PlayerEventGroup::new();
+        retvl.media_open_event = self.media_open_event;
+        retvl.did_jump = self.did_jump;
+        let use_self_position = if self.did_jump == other.did_jump {
+            self_has_priority
+        } else {
+            self.did_jump
+        };
+
+        retvl.position = if use_self_position {
+            self.position
+        } else {
+            None
+        };
+
+        retvl.is_paused = if self_has_priority {
+            self.is_paused
+        } else {
+            None
+        };
+        retvl
+    }
+}
+
+
+mod test {
+    use super::*;
+    #[test]
+    fn test_ip_priority() {
+        let ip_a = SocketAddr::from(([192, 168, 1, 32], 49111));
+        let events_a = PlayerEventGroup::new().with_event(RemoteEvent::Ping(Duration::from_millis(10_000).into())).with_event(RemoteEvent::Pause);
+        let ip_b = SocketAddr::from(([128, 14, 1, 32], 4));
+        let events_b = PlayerEventGroup::new().with_event(RemoteEvent::Ping(Duration::from_millis(1_000).into())).with_event(RemoteEvent::Play);
+
+        let rectified_b = events_b.clone().rectify(ip_b,&events_a, ip_a);
+        let rectified_a = events_a.clone().rectify(ip_a, &events_b, ip_b);
+        assert_eq!(Vec::<RemoteEvent>::new(), rectified_a.into_events().collect::<Vec<_>>());
+        assert_eq!(events_b, rectified_b);
+    }
+
+    #[test]
+    fn test_jump_priority() {
+        let ip_a = SocketAddr::from(([192, 168, 1, 32], 49111));
+        let events_a = PlayerEventGroup::new().with_event(RemoteEvent::Jump(Duration::from_millis(10_000).into())).with_event(RemoteEvent::Pause);
+        let ip_b = SocketAddr::from(([128, 14, 1, 32], 4));
+        let events_b = PlayerEventGroup::new().with_event(RemoteEvent::Ping(Duration::from_millis(1_000).into())).with_event(RemoteEvent::Play);
+
+        let rectified_b = events_b.clone().rectify(ip_b,&events_a, ip_a);
+        let rectified_a = events_a.clone().rectify(ip_a, &events_b, ip_b);
+        assert_eq!(vec![RemoteEvent::Jump(Duration::from_millis(10_000))], rectified_a.into_events().collect::<Vec<_>>());
+        assert_eq!(vec![RemoteEvent::Play], rectified_b.into_events().collect::<Vec<_>>());
+
+        let cascaded_a = events_a.clone().cascade(ip_a, &events_b, ip_b);
+        let cascaded_b = events_b.clone().cascade(ip_b, &events_a, ip_a);
+        assert_eq!(cascaded_a, cascaded_b);
+        assert_eq!(vec![RemoteEvent::Jump(Duration::from_millis(10_000)), RemoteEvent::Play], cascaded_a.into_events().collect::<Vec<_>>());
+
     }
 }
