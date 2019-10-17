@@ -3,22 +3,27 @@ use crate::events::RemoteEvent;
 use crate::DebugError;
 use crate::MyResult;
 
+use crossbeam::atomic::AtomicCell;
+use crossbeam::channel::SendError;
+use crossbeam::channel::{self, Receiver, Sender};
+use crossbeam::sync::ShardedLock;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
-
 mod ipcodec;
 pub use ipcodec::*;
 mod filetransfer;
 pub use filetransfer::*;
 mod networking;
 pub use networking::*;
+
+mod eventgroup;
+use eventgroup::{PlayerEventGroup, priority_ordering};
+
 
 impl<T> DebugError for std::sync::PoisonError<T> {
     fn message(self) -> String {
@@ -48,15 +53,15 @@ impl MessageBuffer {
 
 pub struct ConnectionsThreadHandle {
     local_addr: SocketAddr,
-    public_addr: Arc<RwLock<Option<PublicAddr>>>,
-    client_addresses: Arc<RwLock<Vec<SocketAddr>>>,
-    server_addresses: Arc<RwLock<Vec<SocketAddr>>>,
+    public_addr: Arc<AtomicCell<Option<SocketAddr>>>,
+    client_addresses: Arc<ShardedLock<Vec<SocketAddr>>>,
+    server_addresses: Arc<ShardedLock<Vec<SocketAddr>>>,
 
     message_channel: Sender<ConnectionMessage>,
     event_channel: Sender<RemoteEvent>,
-    event_recv: Arc<Mutex<Receiver<RemoteEvent>>>,
+    event_recv: Receiver<RemoteEvent>,
 
-    handle: Arc<JoinHandle<()>>,
+    background_thread: Arc<ShardedLock<Option<JoinHandle<()>>>>,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -76,24 +81,14 @@ impl ConnectionsThreadHandle {
             .map_err(|e| e.into())
     }
     pub fn public_addr(&self) -> Option<SocketAddr> {
-        let locked = self.public_addr.read();
-        locked
-            .as_ref()
-            .ok()
-            .and_then(|l| l.as_ref())
-            .map(|l| l.addr())
+        self.public_addr.load()
     }
     pub fn send_event(&mut self, event: RemoteEvent) -> MyResult<()> {
         self.event_channel.send(event).map_err(|e| e.into())
     }
 
     pub fn check_events(&mut self) -> MyResult<Vec<RemoteEvent>> {
-        let lock = self
-            .event_recv
-            .lock()
-            .map_err(|e| format!("Mutex Lock Error: {:?}", e))?;
-        let iter = lock.try_iter();
-        let retvl = iter.collect();
+        let retvl = self.event_recv.try_iter().collect();
         Ok(retvl)
     }
 
@@ -124,7 +119,7 @@ impl ConnectionsThreadHandle {
     pub fn has_paniced(&self) -> bool {
         match self.message_channel.send(ConnectionMessage::Ping) {
             Ok(()) => false,
-            Err(std::sync::mpsc::SendError(_)) => true,
+            Err(SendError(_)) => true,
         }
     }
 }
@@ -139,8 +134,8 @@ impl Clone for ConnectionsThreadHandle {
 
             message_channel: self.message_channel.clone(),
             event_channel: self.event_channel.clone(),
-            event_recv: Arc::clone(&self.event_recv),
-            handle: Arc::clone(&self.handle),
+            event_recv: self.event_recv.clone(),
+            background_thread: Arc::clone(&self.background_thread),
         }
     }
 }
@@ -148,9 +143,9 @@ impl Clone for ConnectionsThreadHandle {
 pub struct ConnnectionThread {
     listener: TcpListener,
 
-    public_addr: Arc<RwLock<Option<PublicAddr>>>,
-    client_addresses: Arc<RwLock<Vec<SocketAddr>>>,
-    server_addresses: Arc<RwLock<Vec<SocketAddr>>>,
+    public_addr: Option<PublicAddr>,
+
+    handle_info: Option<ConnectionsThreadHandle>,
 
     message_channel: Option<Receiver<ConnectionMessage>>,
     event_channel: Option<Receiver<RemoteEvent>>,
@@ -169,9 +164,8 @@ impl ConnnectionThread {
     pub fn new(listener: TcpListener) -> ConnnectionThread {
         ConnnectionThread {
             listener,
-            public_addr: Arc::new(RwLock::new(None)),
-            client_addresses: Arc::new(RwLock::new(Vec::new())),
-            server_addresses: Arc::new(RwLock::new(Vec::new())),
+            public_addr: None,
+            handle_info: None,
             message_channel: None,
             event_channel: None,
             event_recv: None,
@@ -184,148 +178,221 @@ impl ConnnectionThread {
     }
 
     fn check_new_connections(&mut self) -> MyResult<Option<SocketAddr>> {
+        self.listener.set_nonblocking(true)?;
         match self.listener.accept() {
             Ok((stream, addr)) => {
                 stream.set_nonblocking(true)?;
                 self.host_connections.push(stream);
-                self.server_addresses.write().unwrap().push(addr);
+                if let Some(handle) = self.handle_info.as_ref() {
+                    handle.server_addresses.write().unwrap().push(addr);
+                }
                 Ok(Some(addr))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
-    fn process_connection_message(&mut self) -> MyResult<()> {
-        let local_addr = self.listener.local_addr()?;
+    fn process_connection_messages(&mut self) -> MyResult<()> {
         let channel = self
             .message_channel
             .as_ref()
+            .cloned()
             .ok_or_else(|| "No message channel found for comms thread!")?;
-        loop {
-            let msg = channel.try_recv();
-            match msg {
-                Ok(ConnectionMessage::ConnectRemote(addr)) => {
-                    println!("Trying to connect to addr {:?}", addr);
-                    let connection = std::net::TcpStream::connect(addr).unwrap();
-                    connection.set_nonblocking(true).unwrap();
-                    self.client_connections.push(connection);
-                    self.client_addresses.write().unwrap().push(addr);
+        for evt in channel.try_iter() {
+            self.process_connection_message(evt)?;
+        }
+        Ok(())
+    }
+    fn process_connection_message(&mut self, msg: ConnectionMessage) -> MyResult<()> {
+        let local_addr = self.listener.local_addr()?;
+        match msg {
+            ConnectionMessage::ConnectRemote(addr) => {
+                let connection = std::net::TcpStream::connect(addr).unwrap();
+                connection.set_nonblocking(true).unwrap();
+                self.client_connections.push(connection);
+                if let Some(handle) = self.handle_info.as_ref() {
+                    handle.client_addresses.write().unwrap().push(addr);
                 }
-                Ok(ConnectionMessage::OpenPublic) => {
-                    let mut addr_lock = self.public_addr.write().unwrap();
-                    if addr_lock.is_none() {
-                        let new_public_addr = PublicAddr::request_public(local_addr)?;
-                        *addr_lock = Some(new_public_addr);
+            }
+            ConnectionMessage::OpenPublic => {
+                if self.public_addr.is_none() {
+                    let new_public_addr = PublicAddr::request_public(local_addr)?;
+                    if let Some(handle) = self.handle_info.as_ref() {
+                        handle.public_addr.store(new_public_addr.addr().into());
                     }
+
+                    self.public_addr = Some(new_public_addr);
                 }
-                Ok(ConnectionMessage::Ping) => {}
-                Err(mpsc::TryRecvError::Empty) => {
-                    break Ok(());
+            }
+            ConnectionMessage::Ping => {}
+        }
+        Ok(())
+    }
+    fn check_remote_events(&mut self) -> MyResult<Vec<(SocketAddr, PlayerEventGroup)>> {
+        let mut retvl = Vec::new();
+        for stream in self
+            .host_connections
+            .iter_mut()
+            .chain(self.client_connections.iter_mut())
+        {
+            let events = collect_stream_events(stream, &mut self.stream_buffers);
+            match events {
+                Ok(evts) => {
+                    retvl.push((stream.peer_addr().unwrap(), evts));
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    break Err(mpsc::TryRecvError::Disconnected.into());
+                Err(e) => {
+                    if e.downcast_ref::<io::Error>()
+                        .map_or(false, is_disconnection_error)
+                    {
+                        //TODO: remove bad addresses.
+                    } else {
+                        return Err(e);
+                    }
                 }
             }
         }
+        retvl.sort_by(|(addr_a, _), (addr_b, _)| priority_ordering(*addr_a, *addr_b));
+        Ok(retvl)
     }
-    pub fn start(mut self) -> MyResult<ConnectionsThreadHandle> {
-        let local_addr = self.listener.local_addr()?;
-        let (message_channel_sender, message_channel_reciever) = mpsc::channel();
-        self.message_channel = Some(message_channel_reciever);
-
-        let (event_channel_sender, event_channel_reciever) = mpsc::channel();
-        self.event_channel = Some(event_channel_reciever);
-
-        let (event_broadcast_sender, event_broadcast_reciever) = mpsc::channel();
-        self.event_recv = Some(event_broadcast_sender);
-        let public_addr = Arc::clone(&self.public_addr);
-        let client_addresses = Arc::clone(&self.client_addresses);
-        let server_addresses = Arc::clone(&self.server_addresses);
-        let handle = thread::spawn(move || loop {
-            if let Err(e) = self.check_new_connections() {
-                crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
-                MyResult::<()>::Err(e).unwrap();
-            }
-            if let Err(e) = self.process_connection_message() {
-                crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
-                MyResult::<()>::Err(e).unwrap();
-            }
-            let mut raw_events = Vec::new();
-            for stream in self.client_connections.iter_mut() {
-                let cur_events = collect_stream_events(stream, &mut self.stream_buffers).unwrap();
-                raw_events.push((stream.peer_addr().unwrap(), cur_events));
-            }
-
-            let mut self_events = PlayerEventGroup::new();
-            for evt in self
-                .event_channel
-                .as_ref()
-                .into_iter()
-                .flat_map(|channel| channel.try_iter())
-            {
-                self_events = self_events.with_event(evt);
-            }
-            let my_ip = if let Some(ref addr) = self.public_addr.read().unwrap().as_ref() {
-                addr.addr()
-            } else {
-                self.listener.local_addr().unwrap()
-            };
-            for stream in self.host_connections.iter_mut() {
-                let cur_events = collect_stream_events(stream, &mut self.stream_buffers).unwrap();
-                raw_events.push((stream.peer_addr().unwrap(), cur_events));
-            }
-
-            let mut rectified_self = self_events.clone();
-            let mut cascaded_remotes = raw_events
-                .first()
-                .cloned()
-                .map(|(_, evt)| evt)
-                .unwrap_or_default();
-
-            for (addr, group) in raw_events.iter_mut() {
-                *group = group.clone().rectify(*addr, &rectified_self, my_ip);
-                rectified_self = rectified_self.rectify(my_ip, group, *addr);
-                cascaded_remotes = cascaded_remotes.cascade(my_ip, group, *addr);
-            }
-            for (addr, group) in raw_events.iter_mut() {
-                *group = group.clone().rectify(*addr, &rectified_self, my_ip);
-                rectified_self = rectified_self.rectify(my_ip, group, *addr);
-                cascaded_remotes = cascaded_remotes.cascade(my_ip, group, *addr);
-            }
-
-            for evt in rectified_self.into_events() {
-                let event_blocks = evt.as_blocks();
-                for block in event_blocks {
-                    let all_streams = self
-                        .client_connections
-                        .iter_mut()
-                        .chain(self.host_connections.iter_mut());
-                    let valid_streams =
-                        all_streams.filter(|stream| validate_connection(stream).unwrap().is_some());
-                    for stream in valid_streams {
-                        stream.write_all(block.as_bytes()).unwrap();
-                    }
+    fn check_self_events(&mut self) -> MyResult<PlayerEventGroup> {
+        let mut retvl = PlayerEventGroup::new();
+        let event_iter = self
+            .event_channel
+            .as_ref()
+            .into_iter()
+            .flat_map(|recv| recv.try_iter());
+        for evt in event_iter {
+            retvl = retvl.with_event(evt);
+        }
+        Ok(retvl)
+    }
+    fn broadcast_events(&mut self, events: PlayerEventGroup) -> MyResult<()> {
+        for evt in events.into_events() {
+            let event_blocks = evt.as_blocks();
+            for block in event_blocks {
+                let all_streams = self
+                    .client_connections
+                    .iter_mut()
+                    .chain(self.host_connections.iter_mut());
+                let valid_streams =
+                    all_streams.filter_map(|stream| match validate_connection(stream) {
+                        Ok(Some(_)) => Some(Ok(stream)),
+                        Ok(None) => None,
+                        Err(e) => Some(Err(e)),
+                    });
+                for stream in valid_streams {
+                    let stream = stream?;
+                    stream.write_all(block.as_bytes())?;
                 }
             }
-            for evt in cascaded_remotes.into_events() {
-                self.event_recv.as_ref().unwrap().send(evt.clone()).unwrap();
-            }
-
-            thread::sleep(Duration::from_millis(20));
-        });
-        let retvl = ConnectionsThreadHandle {
-            local_addr,
-            public_addr,
-            client_addresses,
-            server_addresses,
-
-            message_channel: message_channel_sender,
-            event_channel: event_channel_sender,
-            event_recv: Arc::new(Mutex::new(event_broadcast_reciever)),
-
-            handle: Arc::new(handle),
+        }
+        Ok(())
+    }
+    fn tick(&mut self) {
+        if let Err(e) = self.check_new_connections() {
+            crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
+            MyResult::<()>::Err(e).unwrap();
+        }
+        if let Err(e) = self.process_connection_messages() {
+            crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
+            MyResult::<()>::Err(e).unwrap();
+        }
+        let self_events = self.check_self_events().unwrap();
+        let my_ip = if let Some(ref addr) = self.public_addr.as_ref() {
+            addr.addr()
+        } else {
+            self.listener.local_addr().unwrap()
         };
-        Ok(retvl)
+
+        let mut raw_events = self.check_remote_events().unwrap();
+
+        let mut rectified_self = self_events.clone();
+        let mut cascaded_remotes = raw_events
+            .iter()
+            .next()
+            .map(|(_, evt)| evt.clone())
+            .unwrap_or_default();
+
+        for (addr, group) in raw_events.iter_mut() {
+            *group = group.clone().rectify(*addr, &rectified_self, my_ip);
+            rectified_self = rectified_self.rectify(my_ip, group, *addr);
+            cascaded_remotes = cascaded_remotes.cascade(my_ip, group, *addr);
+        }
+
+        let fake_addr = SocketAddr::from((my_ip.ip(), my_ip.port() - 1));
+        cascaded_remotes = cascaded_remotes.rectify(fake_addr, &rectified_self, my_ip);
+
+        self.broadcast_events(rectified_self).unwrap();
+
+        for evt in cascaded_remotes.into_events() {
+            self.event_recv.as_ref().unwrap().send(evt.clone()).unwrap();
+        }
+    }
+
+    fn new_handle(&mut self) -> MyResult<ConnectionsThreadHandle> {
+        if let Some(existing) = self.handle_info.as_ref().cloned() {
+            Ok(existing)
+        } else {
+            if self.event_channel.is_some()
+                || self.event_recv.is_some()
+                || self.message_channel.is_some()
+            {
+                return Err(
+                    "Error: trying to initiate thread, but already have message channels!".into(),
+                );
+            }
+            let local_addr = self.listener.local_addr()?;
+            let (message_channel_sender, message_channel_reciever) = channel::unbounded();
+            self.message_channel = Some(message_channel_reciever);
+
+            let (event_channel_sender, event_channel_reciever) = channel::unbounded();
+            self.event_channel = Some(event_channel_reciever);
+
+            let (event_broadcast_sender, event_broadcast_reciever) = channel::unbounded();
+            self.event_recv = Some(event_broadcast_sender);
+
+            let existing_client_addresses: Vec<_> = self
+                .client_connections
+                .iter()
+                .flat_map(|con| con.peer_addr().ok().into_iter())
+                .collect();
+            let client_addresses = Arc::new(ShardedLock::new(existing_client_addresses));
+            let existing_server_addresses: Vec<_> = self
+                .host_connections
+                .iter()
+                .flat_map(|con| con.peer_addr().ok().into_iter())
+                .collect();
+            let server_addresses = Arc::new(ShardedLock::new(existing_server_addresses));
+            let public_addr = Arc::new(AtomicCell::new(None));
+            let retvl = ConnectionsThreadHandle {
+                local_addr,
+                public_addr,
+                client_addresses,
+                server_addresses,
+
+                message_channel: message_channel_sender,
+                event_channel: event_channel_sender,
+                event_recv: event_broadcast_reciever,
+
+                background_thread: Arc::new(ShardedLock::new(None)),
+            };
+            self.handle_info = Some(retvl.clone());
+
+            Ok(retvl)
+        }
+    }
+
+    pub fn start_sync(&mut self) -> MyResult<ConnectionsThreadHandle> {
+        self.new_handle()
+    }
+    pub fn start(mut self) -> MyResult<ConnectionsThreadHandle> {
+        let local_handle = self.start_sync()?;
+        let thread_handle = thread::spawn(move || loop {
+            self.tick();
+            thread::yield_now();
+        });
+        *local_handle.background_thread.write().unwrap() = Some(thread_handle);
+        Ok(local_handle)
     }
 }
 
@@ -386,13 +453,7 @@ fn collect_stream_events(
     buffers: &mut HashMap<SocketAddr, MessageBuffer>,
 ) -> MyResult<PlayerEventGroup> {
     match StreamEventIter::from_buffer_map(stream, buffers) {
-        Ok(itr) => {
-            let mut retvl = PlayerEventGroup::new();
-            for evt in itr {
-                retvl = retvl.with_event(evt?);
-            }
-            Ok(retvl)
-        }
+        Ok(itr) => itr.collect(),
         Err(ref e) if is_disconnection_error(e) => Ok(PlayerEventGroup::new()),
         Err(e) => Err(e.into()),
     }
@@ -415,208 +476,231 @@ fn is_disconnection_error(e: &io::Error) -> bool {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Hash, Debug)]
-pub struct PlayerEventGroup {
-    media_open_event: Option<RemoteEvent>,
-    is_paused: Option<bool>,
-    did_jump: bool,
-    position: Option<Duration>,
-}
 
-impl Default for PlayerEventGroup {
-    fn default() -> Self {
-        PlayerEventGroup::new()
-    }
-}
-
-impl PlayerEventGroup {
-    pub fn new() -> Self {
-        PlayerEventGroup {
-            media_open_event: None,
-            is_paused: None,
-            did_jump: false,
-            position: None,
-        }
-    }
-
-    pub fn with_event(mut self, event: RemoteEvent) -> Self {
-        if let Some(RemoteEvent::MediaOpen(_)) = self.media_open_event {
-            return self;
-        }
-        match event {
-            RemoteEvent::Pause => self.is_paused = Some(true),
-            RemoteEvent::Play => self.is_paused = Some(false),
-            RemoteEvent::Jump(dt) => {
-                self.position = Some(dt);
-                self.did_jump = true;
-            }
-            RemoteEvent::MediaOpen(_) => {
-                return PlayerEventGroup::new().with_event(event);
-            }
-            RemoteEvent::MediaOpenOkay(_)
-            | RemoteEvent::RequestTransfer(_)
-            | RemoteEvent::RespondTransfer { .. } => {
-                self.media_open_event = Some(event);
-            }
-            RemoteEvent::Ping(png) => {
-                self.position.get_or_insert(png.time());
-            }
-            RemoteEvent::Shutdown => {
-                return PlayerEventGroup::new();
-            }
-        }
-        self
-    }
-
-    pub fn into_events(self) -> impl Iterator<Item = RemoteEvent> {
-        let status_event = self
-            .is_paused
-            .map(|paused| {
-                if paused {
-                    RemoteEvent::Pause
-                } else {
-                    RemoteEvent::Play
-                }
-            })
-            .into_iter();
-        let media_event = self.media_open_event.into_iter();
-        let position_event = if self.did_jump {
-            let pos = self.position.unwrap_or(Duration::from_micros(0));
-            Some(RemoteEvent::Jump(pos)).into_iter()
-        } else {
-            self.position
-                .map(|p| RemoteEvent::Ping(p.into()))
-                .into_iter()
-        };
-        media_event.chain(position_event).chain(status_event)
-    }
-
-    pub fn cascade(
-        self,
-        self_addr: SocketAddr,
-        other: &PlayerEventGroup,
-        other_addr: SocketAddr,
-    ) -> PlayerEventGroup {
-        let rectified_self = self.rectify(self_addr, other, other_addr);
-        PlayerEventGroup {
-            media_open_event: rectified_self.media_open_event,
-            is_paused: rectified_self.is_paused.or(other.is_paused),
-            did_jump: rectified_self.did_jump || other.did_jump,
-            position: rectified_self.position.or(other.position),
-        }
-    }
-
-    pub fn rectify(
-        self,
-        self_addr: SocketAddr,
-        other: &PlayerEventGroup,
-        other_addr: SocketAddr,
-    ) -> PlayerEventGroup {
-        let self_public = match self_addr.ip() {
-            IpAddr::V4(ip) => !ip.is_private(),
-            IpAddr::V6(_) => true,
-        };
-        let other_public = match other_addr.ip() {
-            IpAddr::V4(ip) => !ip.is_private(),
-            IpAddr::V6(_) => true,
-        };
-        let self_has_priority = if self_public && !other_public {
-            true
-        } else if !self_public && other_public {
-            false
-        } else {
-            let self_bytes: u128 = match self_addr.ip() {
-                IpAddr::V4(ip) => ip.to_ipv6_compatible().into(),
-                IpAddr::V6(ip) => ip.into(),
-            };
-            let other_bytes: u128 = match other_addr.ip() {
-                IpAddr::V4(ip) => ip.to_ipv6_compatible().into(),
-                IpAddr::V6(ip) => ip.into(),
-            };
-            if self_bytes != other_bytes {
-                self_bytes > other_bytes
-            } else {
-                self_addr.port() > other_addr.port()
-            }
-        };
-
-        match (
-            self.media_open_event.as_ref(),
-            other.media_open_event.as_ref(),
-        ) {
-            (Some(RemoteEvent::MediaOpen(ref self_url)), Some(RemoteEvent::MediaOpen(_))) => {
-                if self_has_priority {
-                    return PlayerEventGroup::new()
-                        .with_event(RemoteEvent::MediaOpen(self_url.clone()));
-                } else {
-                    return PlayerEventGroup::new();
-                }
-            }
-            (Some(RemoteEvent::MediaOpen(ref url)), _) => {
-                return PlayerEventGroup::new().with_event(RemoteEvent::MediaOpen(url.to_owned()));
-            }
-            (None, Some(RemoteEvent::MediaOpen(_))) => {
-                return PlayerEventGroup::new();
-            }
-            _ => {}
-        }
-
-        let mut retvl = PlayerEventGroup::new();
-        retvl.media_open_event = self.media_open_event;
-        retvl.did_jump = self.did_jump;
-        let use_self_position = if self.did_jump == other.did_jump {
-            self_has_priority
-        } else {
-            self.did_jump
-        };
-
-        retvl.position = if use_self_position {
-            self.position
-        } else {
-            None
-        };
-
-        retvl.is_paused = if self_has_priority {
-            self.is_paused
-        } else {
-            None
-        };
-        retvl
-    }
-}
-
-
+#[cfg(test)]
 mod test {
     use super::*;
-    #[test]
-    fn test_ip_priority() {
-        let ip_a = SocketAddr::from(([192, 168, 1, 32], 49111));
-        let events_a = PlayerEventGroup::new().with_event(RemoteEvent::Ping(Duration::from_millis(10_000).into())).with_event(RemoteEvent::Pause);
-        let ip_b = SocketAddr::from(([128, 14, 1, 32], 4));
-        let events_b = PlayerEventGroup::new().with_event(RemoteEvent::Ping(Duration::from_millis(1_000).into())).with_event(RemoteEvent::Play);
+    use std::net::Ipv4Addr;
 
-        let rectified_b = events_b.clone().rectify(ip_b,&events_a, ip_a);
-        let rectified_a = events_a.clone().rectify(ip_a, &events_b, ip_b);
-        assert_eq!(Vec::<RemoteEvent>::new(), rectified_a.into_events().collect::<Vec<_>>());
-        assert_eq!(events_b, rectified_b);
+    fn make_test_thread(
+        addr: impl Into<SocketAddr>,
+    ) -> (ConnectionsThreadHandle, ConnnectionThread) {
+        let addr = addr.into();
+        let listener = loop {
+            match TcpListener::bind(addr) {
+                Ok(l) => break l,
+                Err(ref e) if e.kind() == std::io::ErrorKind::AddrInUse => {}
+                e => break e.unwrap(),
+            }
+        };
+        let mut thread = ConnnectionThread::new(listener);
+        let handle = thread.start_sync().unwrap();
+        (handle, thread)
+    }
+
+    fn make_connected_threads() -> (
+        (ConnectionsThreadHandle, ConnnectionThread),
+        (ConnectionsThreadHandle, ConnnectionThread),
+    ) {
+        let host_addr = (Ipv4Addr::LOCALHOST, 30000);
+        let client_addr = (Ipv4Addr::LOCALHOST, 30001);
+        let (host_handle, mut host_thread) = make_test_thread(host_addr);
+        let (mut client_handle, mut client_thread) = make_test_thread(client_addr);
+
+        client_handle.open_connection(host_addr.into()).unwrap();
+
+        client_thread.tick();
+        host_thread.tick();
+
+        ((client_handle, client_thread), (host_handle, host_thread))
+    }
+    #[test]
+    fn test_network_sync() {
+        let ((mut client_handle, mut client_thread), (mut host_handle, mut host_thread)) =
+            make_connected_threads();
+
+        assert_eq!(
+            client_handle.connection_addresses().unwrap(),
+            vec![host_handle.local_addr()]
+        );
+        assert_eq!(host_handle.connection_addresses().unwrap().len(), 1);
+
+        client_handle.send_event(RemoteEvent::Play).unwrap();
+        client_thread.tick();
+        host_thread.tick();
+        let gotten = host_handle.check_events().unwrap();
+        assert_eq!(gotten, vec![RemoteEvent::Play]);
+
+        host_handle.send_event(RemoteEvent::Play).unwrap();
+        host_thread.tick();
+        client_thread.tick();
+        let gotten = client_handle.check_events().unwrap();
+        assert_eq!(gotten, vec![RemoteEvent::Play]);
     }
 
     #[test]
-    fn test_jump_priority() {
-        let ip_a = SocketAddr::from(([192, 168, 1, 32], 49111));
-        let events_a = PlayerEventGroup::new().with_event(RemoteEvent::Jump(Duration::from_millis(10_000).into())).with_event(RemoteEvent::Pause);
-        let ip_b = SocketAddr::from(([128, 14, 1, 32], 4));
-        let events_b = PlayerEventGroup::new().with_event(RemoteEvent::Ping(Duration::from_millis(1_000).into())).with_event(RemoteEvent::Play);
+    fn test_event_ip_priority() {
+        let ((mut client_handle, mut client_thread), (mut host_handle, mut host_thread)) =
+            make_connected_threads();
+        let calc_a = priority_ordering(client_handle.local_addr(), host_handle.local_addr());
+        let calc_b = priority_ordering(
+            host_handle.connection_addresses().unwrap()[0],
+            host_handle.local_addr(),
+        );
+        let calc_c = priority_ordering(
+            client_handle.local_addr(),
+            client_handle.connection_addresses().unwrap()[0],
+        );
 
-        let rectified_b = events_b.clone().rectify(ip_b,&events_a, ip_a);
-        let rectified_a = events_a.clone().rectify(ip_a, &events_b, ip_b);
-        assert_eq!(vec![RemoteEvent::Jump(Duration::from_millis(10_000))], rectified_a.into_events().collect::<Vec<_>>());
-        assert_eq!(vec![RemoteEvent::Play], rectified_b.into_events().collect::<Vec<_>>());
+        assert_eq!(calc_a, calc_b);
+        assert_eq!(calc_b, calc_c);
 
-        let cascaded_a = events_a.clone().cascade(ip_a, &events_b, ip_b);
-        let cascaded_b = events_b.clone().cascade(ip_b, &events_a, ip_a);
-        assert_eq!(cascaded_a, cascaded_b);
-        assert_eq!(vec![RemoteEvent::Jump(Duration::from_millis(10_000)), RemoteEvent::Play], cascaded_a.into_events().collect::<Vec<_>>());
+        let host_has_priority = calc_a == std::cmp::Ordering::Less;
 
+        client_handle
+            .send_event(RemoteEvent::Jump(Duration::from_millis(3000)))
+            .unwrap();
+        client_thread.tick();
+        host_handle
+            .send_event(RemoteEvent::Jump(Duration::from_millis(2000)))
+            .unwrap();
+        host_thread.tick();
+
+        client_thread.tick();
+        host_thread.tick();
+        client_thread.tick();
+        host_thread.tick();
+
+        if host_has_priority {
+            assert_eq!(host_handle.check_events().unwrap(), vec![]);
+            assert_eq!(
+                client_handle.check_events().unwrap(),
+                vec![RemoteEvent::Jump(Duration::from_millis(2000))]
+            );
+        } else {
+            assert_eq!(client_handle.check_events().unwrap(), vec![]);
+            assert_eq!(
+                host_handle.check_events().unwrap(),
+                vec![RemoteEvent::Jump(Duration::from_millis(3000))]
+            );
+        }
+    }
+
+    #[test]
+    fn test_jump_event_priority() {
+        let ((mut client_handle, mut client_thread), (mut host_handle, mut host_thread)) =
+            make_connected_threads();
+        let calc_a = priority_ordering(client_handle.local_addr(), host_handle.local_addr());
+        let calc_b = priority_ordering(
+            host_handle.connection_addresses().unwrap()[0],
+            host_handle.local_addr(),
+        );
+        let calc_c = priority_ordering(
+            client_handle.local_addr(),
+            client_handle.connection_addresses().unwrap()[0],
+        );
+
+        assert_eq!(calc_a, calc_b);
+        assert_eq!(calc_b, calc_c);
+
+        let host_has_priority = calc_a == std::cmp::Ordering::Less;
+
+        host_thread.tick();
+        client_thread.tick();
+
+        let jump_evt = RemoteEvent::Jump(Duration::from_millis(3000));
+        let ping_evt = RemoteEvent::Ping(Duration::from_millis(3000).into());
+        if host_has_priority {
+            client_handle.send_event(jump_evt.clone()).unwrap();
+            host_handle.send_event(ping_evt.clone()).unwrap();
+            host_thread.tick();
+            client_thread.tick();
+            host_thread.tick();
+            client_thread.tick();
+
+            assert_eq!(client_handle.check_events().unwrap(), vec![]);
+            assert_eq!(host_handle.check_events().unwrap(), vec![jump_evt]);
+        } else {
+            client_handle.send_event(ping_evt.clone()).unwrap();
+            host_handle.send_event(jump_evt.clone()).unwrap();
+            host_thread.tick();
+            client_thread.tick();
+            host_thread.tick();
+            client_thread.tick();
+
+            assert_eq!(client_handle.check_events().unwrap(), vec![jump_evt]);
+            assert_eq!(host_handle.check_events().unwrap(), vec![]);
+        }
+    }
+    #[test]
+    fn test_open_overwrite() {
+        let ((mut client_handle, mut client_thread), (mut host_handle, mut host_thread)) =
+            make_connected_threads();
+        let calc_a = priority_ordering(client_handle.local_addr(), host_handle.local_addr());
+        let calc_b = priority_ordering(
+            host_handle.connection_addresses().unwrap()[0],
+            host_handle.local_addr(),
+        );
+        let calc_c = priority_ordering(
+            client_handle.local_addr(),
+            client_handle.connection_addresses().unwrap()[0],
+        );
+
+        assert_eq!(calc_a, calc_b);
+        assert_eq!(calc_b, calc_c);
+
+        let host_has_priority = calc_a == std::cmp::Ordering::Less;
+
+        host_thread.tick();
+        client_thread.tick();
+
+        let ping_evt = RemoteEvent::Ping(Duration::from_millis(3000).into());
+        if host_has_priority {
+            client_handle.send_event(ping_evt.clone()).unwrap();
+            client_handle.send_event(RemoteEvent::Play).unwrap();
+            client_handle
+                .send_event(RemoteEvent::MediaOpen("Test".to_owned()))
+                .unwrap();
+            host_handle.send_event(RemoteEvent::Play).unwrap();
+            host_handle
+                .send_event(RemoteEvent::Jump(Duration::from_millis(2000)))
+                .unwrap();
+            host_handle
+                .send_event(RemoteEvent::RequestTransfer("Test2".to_owned()))
+                .unwrap();
+            host_thread.tick();
+            client_thread.tick();
+            host_thread.tick();
+            client_thread.tick();
+
+            assert_eq!(client_handle.check_events().unwrap(), vec![]);
+            assert_eq!(
+                host_handle.check_events().unwrap(),
+                vec![RemoteEvent::MediaOpen("Test".to_owned())]
+            );
+        } else {
+            host_handle.send_event(ping_evt.clone()).unwrap();
+            host_handle.send_event(RemoteEvent::Play).unwrap();
+            host_handle
+                .send_event(RemoteEvent::MediaOpen("Test".to_owned()))
+                .unwrap();
+            client_handle.send_event(RemoteEvent::Play).unwrap();
+            client_handle
+                .send_event(RemoteEvent::Jump(Duration::from_millis(2000)))
+                .unwrap();
+            client_handle
+                .send_event(RemoteEvent::RequestTransfer("Test2".to_owned()))
+                .unwrap();
+            host_thread.tick();
+            client_thread.tick();
+            host_thread.tick();
+            client_thread.tick();
+
+            assert_eq!(
+                client_handle.check_events().unwrap(),
+                vec![RemoteEvent::MediaOpen("Test".to_owned())]
+            );
+            assert_eq!(host_handle.check_events().unwrap(), vec![]);
+        }
     }
 }
