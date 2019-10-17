@@ -7,6 +7,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, RwLock};
 use std::thread::JoinHandle;
+use std::cell::Cell;
 
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
@@ -18,7 +19,7 @@ pub struct FileTransferHost {
     die_flag: Arc<AtomicBool>,
     file_size: u64,
     local_address: SocketAddr,
-    thread_handle: JoinHandle<()>,
+    thread_handle: Cell<Option<JoinHandle<()>>>,
 }
 
 impl FileTransferHost {
@@ -30,7 +31,7 @@ impl FileTransferHost {
         let file = OpenOptions::new().read(true).open(stripped_url)?;
         let file_size = file.metadata()?.len();
         let thread_handle =
-            file_transfer_host_thread(listener, file, file_size, Arc::clone(&die_flag))?;
+            Cell::new(Some(file_transfer_host_thread(listener, file, file_size, Arc::clone(&die_flag))?));
         Ok(FileTransferHost {
             url,
             die_flag,
@@ -48,9 +49,10 @@ impl FileTransferHost {
     pub fn url(&self) -> &str {
         &self.url
     }
-    pub fn stop(self) -> MyResult<()> {
+    fn stop(&mut self) -> MyResult<()> {
         self.die_flag.store(true, Ordering::Acquire);
-        self.thread_handle.join().map_err(|e| {
+        let thread_handle = self.thread_handle.replace(None).ok_or("This should be unreachable?" )?;
+        thread_handle.join().map_err(|e| {
             if let Some(serr) = e.downcast_ref::<String>() {
                 format!("File transfer panic: String {{ {} }}", serr)
             } else if let Some(ioerr) = e.downcast_ref::<io::Error>() {
@@ -60,6 +62,12 @@ impl FileTransferHost {
             }
         })?;
         Ok(())
+    }
+}
+
+impl Drop for FileTransferHost {
+    fn drop(&mut self) {
+        self.stop().unwrap()
     }
 }
 
@@ -121,7 +129,7 @@ pub struct FileTransferClient {
     progress: Arc<RwLock<u64>>,
     local_file_path: PathBuf,
     finished_flag: Arc<AtomicBool>,
-    handle: JoinHandle<()>,
+    handle: Cell<Option<JoinHandle<()>>>, 
 }
 
 impl FileTransferClient {
@@ -141,13 +149,13 @@ impl FileTransferClient {
             .open(file_name)?;
         let finished_flag = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(RwLock::new(0));
-        let handle = file_transfer_client_thread(
+        let handle = Cell::new(Some(file_transfer_client_thread(
             file_size,
             Arc::clone(&progress),
             remote_code.as_addr(),
             file,
             Arc::clone(&finished_flag),
-        )?;
+        )?));
         Ok(FileTransferClient {
             url,
             file_size,
@@ -180,6 +188,26 @@ impl FileTransferClient {
 
     pub fn progress(&self) -> f64 {
         (self.progress_bytes() as f64) / (self.file_size as f64)
+    }
+
+    fn stop(&mut self) -> MyResult<()> {
+        let thread_handle = self.handle.replace(None).ok_or("This should be unreachable?" )?;
+        thread_handle.join().map_err(|e| {
+            if let Some(serr) = e.downcast_ref::<String>() {
+                format!("File transfer panic: String {{ {} }}", serr)
+            } else if let Some(ioerr) = e.downcast_ref::<io::Error>() {
+                format!("File transfer panic: IoError: {{ {} }}", ioerr)
+            } else {
+                "File transfer panic: Unknown".to_owned()
+            }
+        })?;
+        Ok(())
+    }
+}
+
+impl Drop for FileTransferClient {
+    fn drop(&mut self) {
+        self.stop().unwrap();
     }
 }
 
