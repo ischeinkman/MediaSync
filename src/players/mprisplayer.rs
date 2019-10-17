@@ -42,8 +42,9 @@ impl<T: Sub<Rhs> + PartialOrd<Rhs> + Sized, Rhs: Sub<T, Output = T::Output>> Abs
 impl PlayerStatus {
     pub fn events_since(&self, dt: Duration, previous: Option<&PlayerStatus>) -> Vec<PlayerEvent> {
         let mut retvl = Vec::new();
+        let prev_id = previous.and_then(|p| p.track_id.as_ref());
         let prev_url = previous.and_then(|p| p.track_url.as_ref());
-        if self.track_url.as_ref() != prev_url {
+        if self.track_id.as_ref() != prev_id && self.track_url.as_ref() != prev_url {
             retvl.push(PlayerEvent::MediaOpen(
                 self.track_url.as_ref().cloned().unwrap_or_else(String::new),
             ));
