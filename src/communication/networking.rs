@@ -98,10 +98,6 @@ impl IgdMapping {
             Err(e) => Err(e.into()),
         }
     }
-
-    pub fn close(mut self) -> MyResult<()> {
-        self.close_inner()
-    }
 }
 
 impl Drop for IgdMapping {
