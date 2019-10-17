@@ -6,7 +6,7 @@ use events::RemoteEvent;
 mod players;
 mod traits;
 
-use communication::FriendCodeV4;
+use communication::FriendCode;
 mod state;
 use state::*;
 
@@ -136,13 +136,11 @@ fn simpleui_on_remote_requests_transfer(state: &mut AppState, url: &str) -> MyRe
             println!("Opening transfer port.");
             state.open_transfer_host(url.to_owned())?;
             let transfer_host = state.get_transfer_host(&url).unwrap();
-            let transfer_host_code = transfer_host.transfer_code()?;
+            let transfer_host_code = transfer_host.transfer_code();
             println!(
                 "Transfer server opened using code {}.",
                 transfer_host_code
                     .as_friend_code()
-                    .iter()
-                    .collect::<String>()
             );
             println!("Informing peers.");
             state.broadcast_transfer_host(&url)?;
@@ -206,9 +204,9 @@ pub fn main() {
     for remote in &args.connect_to {
         println!(
             "Trying to connect to {}",
-            remote.as_friend_code().iter().collect::<String>()
+            remote.as_friend_code()
         );
-        state.open_connection(remote.as_addr().into()).unwrap();
+        state.open_connection(remote.as_addr()).unwrap();
         println!("Success!");
     }
 
@@ -231,7 +229,7 @@ pub fn main() {
                             )
                             .unwrap();
                             if let Some((size, code)) = response {
-                                let code = FriendCodeV4::from_code(code);
+                                let code = FriendCode::from_code_v4(code);
                                 state.start_transfer(url.clone(), size, code).unwrap();
                                 let transfer =
                                     state.active_transfers().find(|t| t.url() == url).unwrap();
@@ -293,7 +291,7 @@ pub fn main() {
 pub struct Args {
     show_debug: bool,
     open_public: bool,
-    connect_to: Vec<FriendCodeV4>,
+    connect_to: Vec<FriendCode>,
     mpv_socket: Vec<String>,
 }
 

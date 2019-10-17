@@ -1,4 +1,4 @@
-use crate::communication::FriendCodeV4;
+use crate::communication::FriendCode;
 use crate::Args;
 use clap;
 use clap::{App, Arg, ArgMatches};
@@ -74,18 +74,7 @@ pub fn map_args(parsed: ArgMatches<'_>) -> Args {
         .into_iter()
         .flat_map(|v| v)
         .map(|arg| {
-            let code_bytes = [
-                arg.chars().nth(0).unwrap(),
-                arg.chars().nth(1).unwrap(),
-                arg.chars().nth(2).unwrap(),
-                arg.chars().nth(3).unwrap(),
-                arg.chars().nth(4).unwrap(),
-                arg.chars().nth(5).unwrap(),
-                arg.chars().nth(6).unwrap(),
-                arg.chars().nth(7).unwrap(),
-                arg.chars().nth(8).unwrap(),
-            ];
-            FriendCodeV4::from_code(code_bytes)
+            FriendCode::from_code(arg).unwrap()
         })
         .collect();
     retvl.connect_to = connections;

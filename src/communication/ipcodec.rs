@@ -1,3 +1,6 @@
+use crate::MyResult;
+use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+
 fn decode_ipv4(digits: [char; 6]) -> u32 {
     let mut retvl = 0;
     for (idx, &c) in digits.iter().enumerate() {
@@ -18,7 +21,6 @@ fn decode_ipv4(digits: [char; 6]) -> u32 {
     retvl
 }
 
-#[allow(unused)]
 fn decode_ipv6(digits: [char; 22]) -> u128 {
     let mut retvl = 0u128;
     for (idx, &c) in digits.iter().enumerate() {
@@ -110,7 +112,31 @@ fn encode_ipv4(ip: u32) -> [char; 6] {
     retvl
 }
 
-use std::net::SocketAddrV4;
+fn encode_ipv6(ip: u128) -> [char; 22] {
+    let mut retvl = ['\0'; 22];
+    let mut left = ip;
+    let mut cur_idx = 21;
+    while left > 0 {
+        let digit = (left % 62) as u32;
+        let digit_char = if digit < 10 {
+            std::char::from_digit(digit, 10).unwrap()
+        } else if digit < 36 {
+            let offset = digit - 10 + u32::from('a');
+            std::char::from_u32(offset).unwrap()
+        } else {
+            let offset = digit - 36 + u32::from('A');
+            std::char::from_u32(offset).unwrap()
+        };
+        retvl[cur_idx] = digit_char;
+        if left < 62 {
+            break;
+        }
+        left /= 62;
+        cur_idx -= 1;
+    }
+
+    retvl
+}
 
 fn encode_socketaddrv4(addr: impl Into<SocketAddrV4>) -> [char; 9] {
     let addr = addr.into();
@@ -131,6 +157,18 @@ fn encode_socketaddrv4(addr: impl Into<SocketAddrV4>) -> [char; 9] {
     ]
 }
 
+fn encode_socketaddrv6(addr: impl Into<SocketAddrV6>) -> [char; 25] {
+    let addr = addr.into();
+    let ip_bytes = (*addr.ip()).into();
+    let encoded_ip = encode_ipv6(ip_bytes);
+    let port_bytes = addr.port();
+    let encoded_port = encode_port(port_bytes);
+    let mut retvl = ['\0'; 25];
+    (&mut retvl[..22]).copy_from_slice(&encoded_ip);
+    (&mut retvl[22..]).copy_from_slice(&encoded_port);
+    retvl
+}
+
 fn decode_socketaddrv4(code: [char; 9]) -> SocketAddrV4 {
     let ip_bytes = [code[0], code[1], code[2], code[3], code[4], code[5]];
     let ip_num = decode_ipv4(ip_bytes);
@@ -138,45 +176,76 @@ fn decode_socketaddrv4(code: [char; 9]) -> SocketAddrV4 {
     let port = decode_port(port_bytes);
     SocketAddrV4::new(ip_num.into(), port)
 }
+fn decode_socketaddrv6(code: [char; 25]) -> SocketAddrV6 {
+    let mut ip_bytes = ['\0'; 22];
+    (&mut ip_bytes).copy_from_slice(&code[..22]);
+    let ip_num = decode_ipv6(ip_bytes);
+    let port_bytes = [code[22], code[23], code[24]];
+    let port = decode_port(port_bytes);
+    SocketAddrV6::new(ip_num.into(), port, 0, 0)
+}
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct FriendCodeV4 {
-    addr: SocketAddrV4,
+pub struct FriendCode {
+    addr: SocketAddr,
 }
 
-impl FriendCodeV4 {
-    pub fn from_code(code: [char; 9]) -> Self {
-        FriendCodeV4 {
-            addr: decode_socketaddrv4(code),
+impl FriendCode {
+    pub fn from_code(code: impl AsRef<str>) -> MyResult<Self> {
+        let code = code.as_ref();
+        match code.len() {
+            25 => {
+                let mut buffer = ['\0'; 25];
+                let code_chars = code.chars();
+                for (out, byte) in buffer.iter_mut().zip(code_chars) {
+                    *out = byte;
+                }
+                Ok(FriendCode::from_code_v6(buffer))
+            }
+            9 => {
+                let mut buffer = ['\0'; 9];
+                let code_chars = code.chars();
+                for (out, byte) in buffer.iter_mut().zip(code_chars) {
+                    *out = byte;
+                }
+                Ok(FriendCode::from_code_v4(buffer))
+            }
+            bad => Err(format!("Cannot parse friend code from invalid length {}", bad).into()),
         }
     }
-    pub fn from_addr(addr: SocketAddrV4) -> Self {
-        FriendCodeV4 { addr }
+    pub fn from_code_v4(code: [char; 9]) -> Self {
+        FriendCode::from_addr(decode_socketaddrv4(code))
     }
-    pub fn as_friend_code(self) -> [char; 9] {
-        encode_socketaddrv4(self.addr)
+    pub fn from_code_v6(code: [char; 25]) -> Self {
+        FriendCode::from_addr(decode_socketaddrv6(code))
     }
-    pub fn as_addr(self) -> SocketAddrV4 {
+
+    pub fn from_addr(addr: impl Into<SocketAddr>) -> Self {
+        let addr = addr.into();
+        Self { addr }
+    }
+    pub fn as_friend_code(self) -> String {
+        match self.addr {
+            SocketAddr::V4(addr) => {
+                let bts = encode_socketaddrv4(addr);
+                bts.iter().collect()
+            }
+            SocketAddr::V6(addr) => {
+                let bts = encode_socketaddrv6(addr);
+                bts.iter().collect()
+            }
+        }
+    }
+    pub fn as_addr(self) -> SocketAddr {
         self.addr
-    }
-}
-
-impl From<SocketAddrV4> for FriendCodeV4 {
-    fn from(addr: SocketAddrV4) -> FriendCodeV4 {
-        FriendCodeV4::from_addr(addr)
-    }
-}
-
-impl From<[char; 9]> for FriendCodeV4 {
-    fn from(code: [char; 9]) -> FriendCodeV4 {
-        FriendCodeV4::from_code(code)
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::net::Ipv4Addr;
+    use rand;
+    const TRIALS: usize = 100;
     #[test]
     fn test_port_codec() {
         let port = 41234;
@@ -185,15 +254,16 @@ mod test {
 
     #[test]
     fn test_ipv4_codec() {
-        let ips: &[Ipv4Addr] = &[
-            Ipv4Addr::new(192, 168, 1, 32),
-            Ipv4Addr::BROADCAST,
-            Ipv4Addr::UNSPECIFIED,
-            Ipv4Addr::new(8, 8, 8, 8),
-        ];
-        for &ip in ips {
-            let ip = ip.into();
+        for _ in 0..TRIALS {
+            let ip = rand::random();
             assert_eq!(ip, decode_ipv4(encode_ipv4(ip)));
+        }
+    }
+    #[test]
+    fn test_ipv6_codec() {
+        for _ in 0..TRIALS {
+            let ip = rand::random();
+            assert_eq!(ip, decode_ipv6(encode_ipv6(ip)));
         }
     }
 }

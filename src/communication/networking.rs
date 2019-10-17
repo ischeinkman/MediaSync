@@ -6,21 +6,17 @@ pub fn random_listener(min_port: u16, max_port: u16) -> MyResult<TcpListener> {
     let ip = local_network_ip()?;
     let port = random_port(min_port, max_port);
 
-    let addr = SocketAddrV4::new(ip, port);
+    let addr = SocketAddr::from((ip, port));
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
     Ok(listener)
 }
 
-fn local_network_ip() -> MyResult<Ipv4Addr> {
+fn local_network_ip() -> MyResult<IpAddr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000))?;
     socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000))?;
     let got_addr = socket.local_addr()?;
-    if let IpAddr::V4(ip) = got_addr.ip() {
-        Ok(ip)
-    } else {
-        Err(format!("Error: got invalid IP: {:?}", got_addr.ip()).into())
-    }
+    Ok(got_addr.ip())
 }
 
 fn random_port(from: u16, to: u16) -> u16 {

@@ -1,7 +1,7 @@
 use crate::communication::{
-    ConnectionsThreadHandle, ConnnectionThread, FileTransferClient, FileTransferHost, FriendCodeV4,
+    ConnectionsThreadHandle, ConnnectionThread, FileTransferClient, FileTransferHost, FriendCode,
 };
-use crate::events::{RemoteEvent};
+use crate::events::RemoteEvent;
 use crate::players;
 use crate::players::events::PlayerEvent;
 use crate::traits::MediaPlayer;
@@ -11,17 +11,71 @@ use std::sync::{self, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[derive(Eq, PartialEq, Clone)]
-pub enum MediaOpenState {
-    Broadcasting(String),
-    Requesting(String),
-    Transfering(String),
-    Okay(Option<String>),
+#[derive(Clone, Eq, PartialEq, Default)]
+pub struct MediaOpenState {
+    kind: MediaOpenStateKind,
+    url: Option<String>,
+}
+impl MediaOpenState {
+    pub fn with_url(self, url: String) -> Self {
+        Self {
+            url: Some(url),
+            ..self
+        }
+    }
+
+    pub fn okay() -> Self {
+        MediaOpenState {
+            kind: MediaOpenStateKind::Okay,
+            ..Default::default()
+        }
+    }
+
+    pub fn requesting() -> Self {
+        MediaOpenState {
+            kind: MediaOpenStateKind::Requesting,
+            ..Default::default()
+        }
+    }
+    pub fn transfering() -> Self {
+        MediaOpenState {
+            kind: MediaOpenStateKind::Transfering,
+            ..Default::default()
+        }
+    }
+    pub fn broadcasting() -> Self {
+        MediaOpenState {
+            kind: MediaOpenStateKind::Broadcasting,
+            ..Default::default()
+        }
+    }
+
+    pub fn is_broadcasting(&self, url: &str) -> bool {
+        self.url.as_ref().map_or(false, |cur| cur == url)
+            && self.kind == MediaOpenStateKind::Broadcasting
+    }
+
+    pub fn is_transfering(&self, url: &str) -> bool {
+        self.url.as_ref().map_or(false, |cur| cur == url)
+            && self.kind == MediaOpenStateKind::Transfering
+    }
+    pub fn is_requesting(&self, url: &str) -> bool {
+        self.url.as_ref().map_or(false, |cur| cur == url)
+            && self.kind == MediaOpenStateKind::Requesting
+    }
 }
 
-impl Default for MediaOpenState {
+#[derive(Eq, PartialEq, Clone, Copy)]
+pub enum MediaOpenStateKind {
+    Broadcasting,
+    Requesting,
+    Transfering,
+    Okay,
+}
+
+impl Default for MediaOpenStateKind {
     fn default() -> Self {
-        MediaOpenState::Okay(None)
+        MediaOpenStateKind::Okay
     }
 }
 
@@ -52,19 +106,16 @@ impl AppState {
     pub fn local_friendcode_str(&self) -> String {
         self.comms
             .as_ref()
-            .map(|t| match t.local_addr() {
-                SocketAddr::V4(v) => FriendCodeV4::from_addr(v).as_friend_code().iter().collect(),
-                SocketAddr::V6(v) => format!("Unsupported addr: {:?}", v),
-            })
+            .map(|t| FriendCode::from_addr(t.local_addr()).as_friend_code()
+            )
             .unwrap_or_else(|| "ERROR: no comms thread found.".to_owned())
     }
 
     pub fn public_friendcode_str(&self) -> String {
         match self.comms.as_ref().map(|c| c.public_addr()) {
-            Some(Some(SocketAddr::V4(v))) => {
-                FriendCodeV4::from_addr(v).as_friend_code().iter().collect()
+            Some(Some(s)) => {
+                FriendCode::from_addr(s).as_friend_code()
             }
-            Some(Some(SocketAddr::V6(v))) => format!("Unsupported addr: {:?}", v),
             Some(None) => "NONE".to_owned(),
             None => "ERROR: no comms thread found.".to_owned(),
         }
@@ -119,21 +170,27 @@ impl AppState {
             let remote_events = comms_ref.check_events().unwrap();
             if comms_ref.connection_addresses().unwrap().is_empty() {
                 crate::debug_print("REMOTE: No connections found.".to_owned());
-                let cur_state_bad = if let MediaOpenState::Okay(_) = *state_ref.read().unwrap() {
-                    false
-                } else {
-                    true
-                };
+                let cur_state_bad = MediaOpenStateKind::Okay != state_ref.read().unwrap().kind;
                 if cur_state_bad {
-                    *state_ref.write().unwrap() = MediaOpenState::Okay(None);
+                    *state_ref.write().unwrap() = MediaOpenState::default();
                 }
                 continue;
             }
-            let has_transfer = if let MediaOpenState::Okay(_) = *state_ref.read().unwrap() {
-                false
-            } else {
-                true
-            };
+            let new_transfer = player_events.iter().find(|evt| {
+                if let PlayerEvent::MediaOpen(_) = evt {
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Some(PlayerEvent::MediaOpen(url)) = new_transfer {
+                crate::debug_print(format!("REMOTE: I'm sending OPEN event: {:?}", url));
+                *state_ref.write().unwrap() = MediaOpenState::broadcasting().with_url(url.clone());
+                comms_ref
+                    .send_event(PlayerEvent::MediaOpen(url.clone()).into())
+                    .unwrap();
+            }
+            let has_transfer = MediaOpenStateKind::Okay != state_ref.read().unwrap().kind;
             if !has_transfer {
                 for evt in player_events {
                     crate::debug_print(format!("REMOTE: I'm sending event: {:?}", evt));
@@ -177,16 +234,23 @@ impl AppState {
                     }
                     RemoteEvent::MediaOpen(ref url) => {
                         crate::debug_print(format!("REMOTE: sent MediaOpen: {}", url));
-                        let needs_transition =
-                            if let MediaOpenState::Okay(ref old_url) = *state_ref.read().unwrap() {
-                                old_url != &Some(url.clone())
+
+                        let needs_transition = {
+                            let state = state_ref.read().unwrap();
+                            if let Some(ref old_url) = state.url {
+                                if state.kind == MediaOpenStateKind::Okay {
+                                    old_url != url
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
-                            };
+                            }
+                        };
                         if needs_transition {
                             player_lock.send_event(PlayerEvent::Pause).unwrap();
                             *state_ref.write().unwrap() =
-                                MediaOpenState::Requesting(url.to_owned());
+                                MediaOpenState::requesting().with_url(url.to_owned());
                             callback.send(evt).unwrap();
                             break;
                         } else {
@@ -197,27 +261,27 @@ impl AppState {
                     }
                     RemoteEvent::RequestTransfer(ref url) => {
                         crate::debug_print(format!("Remote sent RequestTransfer: {}", url));
-                        if *state_ref.read().unwrap()
-                            == MediaOpenState::Broadcasting(url.to_owned())
-                        {
+                        if state_ref.read().unwrap().is_broadcasting(url) {
                             callback.send(evt).unwrap();
                         }
                     }
                     RemoteEvent::RespondTransfer { .. } => {
                         crate::debug_print(format!("Remote sent RespondTransfer"));
-                        if let MediaOpenState::Requesting { .. } = *state_ref.read().unwrap() {
+                        if MediaOpenStateKind::Requesting == state_ref.read().unwrap().kind {
                             callback.send(evt).unwrap();
                         }
                     }
                     RemoteEvent::MediaOpenOkay(ref url) => {
                         crate::debug_print(format!("Remote sent MediaOpenOkay: {}", url));
                         let state = state_ref.read().unwrap();
-                        let is_bad = *state != MediaOpenState::Broadcasting(url.clone())
-                            && *state != MediaOpenState::Transfering(url.clone());
-                        if is_bad {
+                        let is_good = state.is_broadcasting(url)
+                            || state.is_transfering(url)
+                            || state.is_requesting(url);
+                        if !is_good {
                             println!("WARN: got MediaOpenOkay({}) without being in the middle of a broadcast!", url);
                         } else {
-                            *state_ref.write().unwrap() = MediaOpenState::Okay(Some(url.clone()));
+                            *state_ref.write().unwrap() =
+                                MediaOpenState::okay().with_url(url.clone());
                             player_lock.send_event(PlayerEvent::Play).unwrap();
                         }
                     }
@@ -243,7 +307,7 @@ impl AppState {
     }
 
     pub fn broadcast_transfer_host(&mut self, url: &str) -> MyResult<()> {
-        if *self.state.read().unwrap() != MediaOpenState::Broadcasting(url.to_owned()) {
+        if !self.state.read().unwrap().is_broadcasting(url) {
             return Err(format!(
                 "ERROR: got transfer request for {} when not broadcasting!",
                 url
@@ -256,9 +320,13 @@ impl AppState {
                 url
             )
         })?;
+        let mut transfer_code = ['\0' ; 9];
+        for (outpt, inpt) in transfer_code.iter_mut().zip(transfer_host.transfer_code().as_friend_code().chars()) {
+            *outpt = inpt;
+        }
         let evt = RemoteEvent::RespondTransfer {
             size: transfer_host.file_size(),
-            transfer_code: Some(transfer_host.transfer_code()?.as_friend_code()),
+            transfer_code : Some(transfer_code),
         };
         if let Some(c) = self.comms.as_mut() {
             c.send_event(evt)?;
@@ -266,7 +334,7 @@ impl AppState {
                 "LOCAL: state transition: Broadcasting({}) => Transfering({})",
                 url, url
             ));
-            *self.state.write().unwrap() = MediaOpenState::Transfering(url.to_owned());
+            *self.state.write().unwrap() = MediaOpenState::transfering().with_url(url.to_owned());
         }
         Ok(())
     }
@@ -279,9 +347,9 @@ impl AppState {
         &mut self,
         url: String,
         file_size: u64,
-        remote_addr: FriendCodeV4,
+        remote_addr: FriendCode,
     ) -> MyResult<()> {
-        if *self.state.read().unwrap() != MediaOpenState::Requesting(url.clone()) {
+        if !self.state.read().unwrap().is_requesting(&url) {
             return Err(format!("ERROR: Got start_transfer({}) without requesting!", url).into());
         }
         let has_transfer = self.transfers.iter().any(|t| t.url() == url);
@@ -299,7 +367,7 @@ impl AppState {
     }
 
     pub fn media_open_okay(&mut self, url: String) -> MyResult<()> {
-        if *self.state.read().unwrap() != MediaOpenState::Requesting(url.clone()) {
+        if !self.state.read().unwrap().is_requesting(&url) {
             return Err(format!("Error: got unexpected MediaOpen for url {}", url).into());
         }
         let local_url = if url.starts_with("file://") {
@@ -328,7 +396,7 @@ impl AppState {
                 "LOCAL: state transition: Requesting({}) => Okay({})",
                 url, url
             ));
-            *(self.state.write().unwrap()) = MediaOpenState::Okay(Some(url.to_owned()));
+            *(self.state.write().unwrap()) = MediaOpenState::okay().with_url(url.to_owned());
             Ok(())
         } else {
             Err(format!("ERROR: no player found to open local file {}!", local_url).into())

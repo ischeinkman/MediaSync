@@ -1,4 +1,4 @@
-use crate::communication::FriendCodeV4;
+use crate::communication::FriendCode;
 use crate::communication::*;
 use crate::MyResult;
 use std::collections::HashMap;
@@ -39,15 +39,8 @@ impl FileTransferHost {
             thread_handle,
         })
     }
-    pub fn transfer_code(&self) -> MyResult<FriendCodeV4> {
-        match self.local_address {
-            SocketAddr::V4(v4) => Ok(FriendCodeV4::from_addr(v4)),
-            SocketAddr::V6(v6) => Err(format!(
-                "Error: friend codes for IPv6 address {:?} is not yet implemented. ",
-                v6
-            )
-            .into()),
-        }
+    pub fn transfer_code(&self) -> FriendCode {
+        FriendCode::from_addr(self.local_address)
     }
     pub fn file_size(&self) -> u64 {
         self.file_size
@@ -135,7 +128,7 @@ impl FileTransferClient {
     pub fn new(
         url: String,
         file_size: u64,
-        remote_code: FriendCodeV4,
+        remote_code: FriendCode,
     ) -> MyResult<FileTransferClient> {
         let path = std::path::Path::new(url.trim_start_matches("file://"));
         let file_name = path
@@ -151,7 +144,7 @@ impl FileTransferClient {
         let handle = file_transfer_client_thread(
             file_size,
             Arc::clone(&progress),
-            remote_code.as_addr().into(),
+            remote_code.as_addr(),
             file,
             Arc::clone(&finished_flag),
         )?;
