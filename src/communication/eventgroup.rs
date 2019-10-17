@@ -69,7 +69,6 @@ impl PlayerEventGroup {
     }
 
     pub fn into_events(self) -> impl Iterator<Item = RemoteEvent> {
-        assert!(!self.did_jump || self.position.is_some());
         let status_event = self
             .is_paused
             .map(|paused| {
@@ -98,7 +97,6 @@ impl PlayerEventGroup {
         other: &PlayerEventGroup,
         other_addr: SocketAddr,
     ) -> PlayerEventGroup {
-        assert!(!self.did_jump || self.position.is_some());
         if let Some(RemoteEvent::MediaOpen(_)) = self.media_open_event.last() {
             let mut other_events = other.media_open_event.clone();
             other_events.extend_from_slice(&self.media_open_event);
@@ -134,14 +132,13 @@ impl PlayerEventGroup {
         other: &PlayerEventGroup,
         other_addr: SocketAddr,
     ) -> PlayerEventGroup {
-        assert!(!self.did_jump || self.position.is_some());
         let self_has_priority =
             priority_ordering(self_addr, other_addr) == std::cmp::Ordering::Greater;
         match (self.media_open_event.last(), other.media_open_event.last()) {
             (Some(RemoteEvent::MediaOpen(ref self_url)), Some(RemoteEvent::MediaOpen(_))) => {
                 if self_has_priority {
                     return PlayerEventGroup::new()
-                        .with_event(RemoteEvent::MediaOpen(self_url.clone()));
+                        .with_event(RemoteEvent::MediaOpen(self_url.to_owned()));
                 } else {
                     return PlayerEventGroup::new();
                 }
@@ -157,7 +154,7 @@ impl PlayerEventGroup {
         }
 
         let mut retvl = PlayerEventGroup::new();
-        retvl.media_open_event = self.media_open_event.clone();
+        retvl.media_open_event = self.media_open_event;
         retvl.did_jump = self.did_jump && (!other.did_jump || self_has_priority);
         let use_self_position = if self.did_jump == other.did_jump {
             self_has_priority
@@ -165,10 +162,6 @@ impl PlayerEventGroup {
             self.did_jump
         };
 
-        assert!(
-            (!other.did_jump || other.position.is_some())
-                && (!self.did_jump || self.position.is_some())
-        );
         retvl.position = if use_self_position || other.position.is_none() {
             self.position
         } else {
@@ -180,13 +173,6 @@ impl PlayerEventGroup {
         } else {
             None
         };
-        assert!(
-            !retvl.did_jump || retvl.position.is_some(),
-            "Invalid retvl: {:?} + {:?} => {:?}",
-            self,
-            other,
-            retvl
-        );
         retvl
     }
 }

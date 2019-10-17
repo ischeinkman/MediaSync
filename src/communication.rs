@@ -290,11 +290,9 @@ impl ConnnectionThread {
     }
     fn tick(&mut self) {
         if let Err(e) = self.check_new_connections() {
-            crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
             MyResult::<()>::Err(e).unwrap();
         }
         if let Err(e) = self.process_connection_messages() {
-            crate::debug_print(format!("Comms thread dying due to error:  {:?}", e));
             MyResult::<()>::Err(e).unwrap();
         }
         let self_events = self.check_self_events().unwrap();
@@ -306,7 +304,7 @@ impl ConnnectionThread {
 
         let mut raw_events = self.check_remote_events().unwrap();
 
-        let mut rectified_self = self_events.clone();
+        let mut rectified_self = self_events;
         let mut cascaded_remotes = raw_events
             .iter()
             .next()
@@ -325,7 +323,7 @@ impl ConnnectionThread {
         self.broadcast_events(rectified_self).unwrap();
 
         for evt in cascaded_remotes.into_events() {
-            self.event_recv.as_ref().unwrap().send(evt.clone()).unwrap();
+            self.event_recv.as_ref().unwrap().send(evt).unwrap();
         }
     }
 

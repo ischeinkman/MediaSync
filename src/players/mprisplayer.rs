@@ -122,31 +122,23 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
     fn send_event(&mut self, msg: PlayerEvent) -> MyResult<()> {
         match msg {
             PlayerEvent::Jump(ref time) => {
-                println!("Trying to jump to {}", time.as_millis());
                 let current_track_id = match self.current_trackid()? {
                     Some(t) => t,
                     None => return Ok(()),
                 };
-                crate::debug_print(format!("Hello cutie"));
-                crate::debug_print(format!("You're amazing"));
                 self.player
                     .set_position(current_track_id, &time)
                     .map_err(DebugError::into_myerror)?;
-                crate::debug_print(format!("And I love you"));
                 self.player.play().map_err(DebugError::into_myerror)?;
 
-                println!("Finished jump?");
             }
             PlayerEvent::Pause => {
-                crate::debug_print(format!("Player got paused."));
                 self.player.pause().map_err(DebugError::into_myerror)?;
             }
             PlayerEvent::Play => {
-                crate::debug_print(format!("Player got played."));
                 self.player.play().map_err(DebugError::into_myerror)?;
             }
             PlayerEvent::MediaOpen(ref url) => {
-                crate::debug_print(format!("Player got open: {}.", url));
                 self.player
                     .add_track_at_start(&url, true)
                     .map_err(DebugError::into_myerror)?;
@@ -162,7 +154,6 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
             .player
             .get_position()
             .map_err(DebugError::into_myerror)?;
-        crate::debug_print(format!("Sending ping {}", current_time.as_millis()));
         Ok(TimePing::from(current_time))
     }
 
@@ -175,18 +166,9 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
             ping.time() - current_time
         };
         if difference > POSITION_ERROR_MARGIN {
-            println!(
-                "Ping correction: {}{}",
-                if current_time > ping.time() { "-" } else { "+" },
-                difference.as_millis()
-            );
             let current_track = if let Some(t) = self.current_trackid()? {
                 t
             } else {
-                println!(
-                    "WARN: got no track to set position to for ping with time {}!",
-                    ping.as_micros()
-                );
                 return Ok(());
             };
             let adapted_time = ping.time() + (POSITION_ERROR_MARGIN * 50) / 100;
@@ -197,7 +179,6 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
                 prev.position = adapted_time;
             }
         }
-        crate::debug_print(format!("Got ping {}", ping.as_micros() / 1000));
         Ok(())
     }
 

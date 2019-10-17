@@ -106,16 +106,13 @@ impl AppState {
     pub fn local_friendcode_str(&self) -> String {
         self.comms
             .as_ref()
-            .map(|t| FriendCode::from_addr(t.local_addr()).as_friend_code()
-            )
+            .map(|t| FriendCode::from_addr(t.local_addr()).as_friend_code())
             .unwrap_or_else(|| "ERROR: no comms thread found.".to_owned())
     }
 
     pub fn public_friendcode_str(&self) -> String {
         match self.comms.as_ref().map(|c| c.public_addr()) {
-            Some(Some(s)) => {
-                FriendCode::from_addr(s).as_friend_code()
-            }
+            Some(Some(s)) => FriendCode::from_addr(s).as_friend_code(),
             Some(None) => "NONE".to_owned(),
             None => "ERROR: no comms thread found.".to_owned(),
         }
@@ -169,7 +166,6 @@ impl AppState {
             let player_events = player_lock.check_events(ellapsed).unwrap();
             let remote_events = comms_ref.check_events().unwrap();
             if comms_ref.connection_addresses().unwrap().is_empty() {
-                crate::debug_print("REMOTE: No connections found.".to_owned());
                 let cur_state_bad = MediaOpenStateKind::Okay != state_ref.read().unwrap().kind;
                 if cur_state_bad {
                     *state_ref.write().unwrap() = MediaOpenState::default();
@@ -184,7 +180,6 @@ impl AppState {
                 }
             });
             if let Some(PlayerEvent::MediaOpen(url)) = new_transfer {
-                crate::debug_print(format!("REMOTE: I'm sending OPEN event: {:?}", url));
                 *state_ref.write().unwrap() = MediaOpenState::broadcasting().with_url(url.clone());
                 comms_ref
                     .send_event(PlayerEvent::MediaOpen(url.clone()).into())
@@ -193,36 +188,27 @@ impl AppState {
             let has_transfer = MediaOpenStateKind::Okay != state_ref.read().unwrap().kind;
             if !has_transfer {
                 for evt in player_events {
-                    crate::debug_print(format!("REMOTE: I'm sending event: {:?}", evt));
                     comms_ref.send_event(evt.into()).unwrap();
                 }
                 comms_ref
                     .send_event(RemoteEvent::Ping(player_lock.ping().unwrap()))
                     .unwrap();
-            } else {
-                crate::debug_print(format!("REMOTE: Not sending events: has transfer"));
-                if !player_events.iter().all(|evt| evt != &PlayerEvent::Play) {
-                    player_lock.send_event(PlayerEvent::Pause).unwrap();
-                    crate::debug_print("LOCAL: Repausing player.".to_owned());
-                }
+            } else if !player_events.iter().all(|evt| evt != &PlayerEvent::Play) {
+                player_lock.send_event(PlayerEvent::Pause).unwrap();
             }
-            crate::debug_print(format!("REMOTE: recieved events {:?}", remote_events));
             for evt in remote_events {
                 match evt {
                     RemoteEvent::Jump(tm) => {
-                        crate::debug_print(format!("REMOTE: sent Jump {}", tm.as_micros()));
                         if !has_transfer {
                             player_lock.send_event(PlayerEvent::Jump(tm)).unwrap();
                         }
                     }
                     RemoteEvent::Pause => {
-                        crate::debug_print(format!("REMOTE: sent Pause!"));
                         if !has_transfer {
                             player_lock.send_event(PlayerEvent::Pause).unwrap();
                         }
                     }
                     RemoteEvent::Play => {
-                        crate::debug_print(format!("REMOTE: sent Play!"));
                         if !has_transfer {
                             player_lock.send_event(PlayerEvent::Play).unwrap();
                         }
@@ -233,8 +219,6 @@ impl AppState {
                         }
                     }
                     RemoteEvent::MediaOpen(ref url) => {
-                        crate::debug_print(format!("REMOTE: sent MediaOpen: {}", url));
-
                         let needs_transition = {
                             let state = state_ref.read().unwrap();
                             if let Some(ref old_url) = state.url {
@@ -260,19 +244,16 @@ impl AppState {
                         }
                     }
                     RemoteEvent::RequestTransfer(ref url) => {
-                        crate::debug_print(format!("Remote sent RequestTransfer: {}", url));
                         if state_ref.read().unwrap().is_broadcasting(url) {
                             callback.send(evt).unwrap();
                         }
                     }
                     RemoteEvent::RespondTransfer { .. } => {
-                        crate::debug_print(format!("Remote sent RespondTransfer"));
                         if MediaOpenStateKind::Requesting == state_ref.read().unwrap().kind {
                             callback.send(evt).unwrap();
                         }
                     }
                     RemoteEvent::MediaOpenOkay(ref url) => {
-                        crate::debug_print(format!("Remote sent MediaOpenOkay: {}", url));
                         let state = state_ref.read().unwrap();
                         let is_good = state.is_broadcasting(url)
                             || state.is_transfering(url)
@@ -285,9 +266,7 @@ impl AppState {
                             player_lock.send_event(PlayerEvent::Play).unwrap();
                         }
                     }
-                    RemoteEvent::Shutdown => {
-                        crate::debug_print(format!("Remote sent Shutdown"));
-                    }
+                    RemoteEvent::Shutdown => {}
                 }
             }
             prev_time = cur_time;
@@ -320,20 +299,19 @@ impl AppState {
                 url
             )
         })?;
-        let mut transfer_code = ['\0' ; 9];
-        for (outpt, inpt) in transfer_code.iter_mut().zip(transfer_host.transfer_code().as_friend_code().chars()) {
+        let mut transfer_code = ['\0'; 9];
+        for (outpt, inpt) in transfer_code
+            .iter_mut()
+            .zip(transfer_host.transfer_code().as_friend_code().chars())
+        {
             *outpt = inpt;
         }
         let evt = RemoteEvent::RespondTransfer {
             size: transfer_host.file_size(),
-            transfer_code : Some(transfer_code),
+            transfer_code: Some(transfer_code),
         };
         if let Some(c) = self.comms.as_mut() {
             c.send_event(evt)?;
-            crate::debug_print(format!(
-                "LOCAL: state transition: Broadcasting({}) => Transfering({})",
-                url, url
-            ));
             *self.state.write().unwrap() = MediaOpenState::transfering().with_url(url.to_owned());
         }
         Ok(())
@@ -392,11 +370,7 @@ impl AppState {
         if let Some(player_mutex) = self.player.as_ref() {
             let mut lock = player_mutex.lock().map_err(DebugError::into_myerror)?;
             lock.send_event(PlayerEvent::MediaOpen(local_url))?;
-            crate::debug_print(format!(
-                "LOCAL: state transition: Requesting({}) => Okay({})",
-                url, url
-            ));
-            *(self.state.write().unwrap()) = MediaOpenState::okay().with_url(url.to_owned());
+            *(self.state.write().unwrap()) = MediaOpenState::okay().with_url(url.clone());
             Ok(())
         } else {
             Err(format!("ERROR: no player found to open local file {}!", local_url).into())

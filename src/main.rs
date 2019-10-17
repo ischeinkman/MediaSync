@@ -95,10 +95,6 @@ fn simpleui_select_player(_args: &Args, state: &mut AppState, options_vec: &[(St
     };
     println!("Now connecting to player {}", selection_name);
     state.open_player(selection_list, selection_name).unwrap();
-    crate::debug_print(format!(
-        "Connected to player {} - {}",
-        selection_list, selection_name
-    ));
     println!("Connection successful!");
 }
 
@@ -311,25 +307,4 @@ impl Args {
         let clap_args = clapui::init_parser();
         clapui::map_args(clap_args.get_matches())
     }
-}
-
-#[inline(always)]
-pub fn debug_print(_msg: String) {
-    /*
-    use std::io::Write;
-    let mut fl = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("ilanlog.txt")
-        .unwrap();
-    writeln!(
-        &mut fl,
-        "{}: {}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        msg
-    )
-    .unwrap();*/
 }
