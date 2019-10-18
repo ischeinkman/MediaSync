@@ -3,7 +3,6 @@ use crate::events::RemoteEvent;
 use crate::DebugError;
 use crate::MyResult;
 
-use crossbeam::atomic::AtomicCell;
 use crossbeam::channel::SendError;
 use crossbeam::channel::{self, Receiver, Sender};
 use crossbeam::sync::ShardedLock;
@@ -52,7 +51,7 @@ impl MessageBuffer {
 
 pub struct ConnectionsThreadHandle {
     local_addr: SocketAddr,
-    public_addr: Arc<AtomicCell<Option<SocketAddr>>>,
+    public_addr: Arc<ShardedLock<Option<SocketAddr>>>,
     client_addresses: Arc<ShardedLock<Vec<SocketAddr>>>,
     server_addresses: Arc<ShardedLock<Vec<SocketAddr>>>,
 
@@ -80,7 +79,7 @@ impl ConnectionsThreadHandle {
             .map_err(|e| e.into())
     }
     pub fn public_addr(&self) -> Option<SocketAddr> {
-        self.public_addr.load()
+        self.public_addr.read().ok().and_then(|locked| *locked)
     }
     pub fn send_event(&mut self, event: RemoteEvent) -> MyResult<()> {
         self.event_channel.send(event).map_err(|e| e.into())
@@ -217,7 +216,7 @@ impl ConnnectionThread {
                 if self.public_addr.is_none() {
                     let new_public_addr = PublicAddr::request_public(local_addr)?;
                     if let Some(handle) = self.handle_info.as_ref() {
-                        handle.public_addr.store(new_public_addr.addr().into());
+                        *handle.public_addr.write().unwrap() = new_public_addr.addr().into();
                     }
 
                     self.public_addr = Some(new_public_addr);
@@ -362,7 +361,7 @@ impl ConnnectionThread {
                 .flat_map(|con| con.peer_addr().ok().into_iter())
                 .collect();
             let server_addresses = Arc::new(ShardedLock::new(existing_server_addresses));
-            let public_addr = Arc::new(AtomicCell::new(None));
+            let public_addr = Arc::new(ShardedLock::new(None));
             let retvl = ConnectionsThreadHandle {
                 local_addr,
                 public_addr,
