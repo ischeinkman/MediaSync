@@ -12,5 +12,6 @@ rand = "0.7"
 mpris = "2.0.0-rc1"
 clap = "2.33"
 crossbeam = "0.7"
+url = "2.1"
 
 [features]

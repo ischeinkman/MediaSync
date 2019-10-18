@@ -1,16 +1,19 @@
 use crate::communication::FriendCode;
 use crate::communication::*;
+use crate::communication::networking::PublicAddr;
 use crate::MyResult;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc, RwLock};
 use std::thread::JoinHandle;
-use std::cell::Cell;
 
 use std::io;
 use std::io::{Read, Seek, SeekFrom};
+
+use url::Url;
 
 const BUFFER_SIZE: usize = 1024 * 1024 * 16;
 
@@ -18,30 +21,38 @@ pub struct FileTransferHost {
     url: String,
     die_flag: Arc<AtomicBool>,
     file_size: u64,
-    local_address: SocketAddr,
+    address: PublicAddr,
     thread_handle: Cell<Option<JoinHandle<()>>>,
 }
 
 impl FileTransferHost {
     pub fn new(url: String) -> MyResult<FileTransferHost> {
-        let stripped_url = url.trim_start_matches("file://");
+        let stripped_url = Url::parse(&url)?
+            .to_file_path()
+            .map_err(|_| format!("Could not parse path from url {:?}", url))?;
         let die_flag = Arc::new(AtomicBool::new(false));
         let listener = random_listener(40_000, 41_000)?;
-        let local_address = listener.local_addr()?;
+        let local_addr = listener.local_addr()?;
+        let address = PublicAddr::request_public(local_addr)?;
+
         let file = OpenOptions::new().read(true).open(stripped_url)?;
         let file_size = file.metadata()?.len();
-        let thread_handle =
-            Cell::new(Some(file_transfer_host_thread(listener, file, file_size, Arc::clone(&die_flag))?));
+        let thread_handle = Cell::new(Some(file_transfer_host_thread(
+            listener,
+            file,
+            file_size,
+            Arc::clone(&die_flag),
+        )?));
         Ok(FileTransferHost {
             url,
             die_flag,
             file_size,
-            local_address,
+            address,
             thread_handle,
         })
     }
     pub fn transfer_code(&self) -> FriendCode {
-        FriendCode::from_addr(self.local_address)
+        FriendCode::from_addr(self.address.addr())
     }
     pub fn file_size(&self) -> u64 {
         self.file_size
@@ -50,8 +61,11 @@ impl FileTransferHost {
         &self.url
     }
     fn stop(&mut self) -> MyResult<()> {
-        self.die_flag.store(true, Ordering::Acquire);
-        let thread_handle = self.thread_handle.replace(None).ok_or("This should be unreachable?" )?;
+        self.die_flag.store(true, Ordering::SeqCst);
+        let thread_handle = self
+            .thread_handle
+            .replace(None)
+            .ok_or("This should be unreachable?")?;
         thread_handle.join().map_err(|e| {
             if let Some(serr) = e.downcast_ref::<String>() {
                 format!("File transfer panic: String {{ {} }}", serr)
@@ -80,8 +94,8 @@ fn file_transfer_host_thread(
     let mut connections: Vec<TcpStream> = Vec::new();
     let mut positions: HashMap<SocketAddr, u64> = HashMap::new();
     let mut buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE);
-    let handle = thread::spawn(move || loop {
-        if die_flag.load(Ordering::Acquire) {
+    let handle = thread::Builder::new().name("FTH thread".to_owned()).spawn(move || loop {
+        if die_flag.load(Ordering::SeqCst) {
             return;
         }
         match listener.accept() {
@@ -115,10 +129,8 @@ fn file_transfer_host_thread(
             .collect();
         if connections.is_empty() {
             thread::yield_now();
-        } else {
-            thread::sleep(Duration::from_millis(5));
         }
-    });
+    })?;
 
     Ok(handle)
 }
@@ -129,7 +141,7 @@ pub struct FileTransferClient {
     progress: Arc<RwLock<u64>>,
     local_file_path: PathBuf,
     finished_flag: Arc<AtomicBool>,
-    handle: Cell<Option<JoinHandle<()>>>, 
+    handle: Cell<Option<JoinHandle<()>>>,
 }
 
 impl FileTransferClient {
@@ -138,7 +150,9 @@ impl FileTransferClient {
         file_size: u64,
         remote_code: FriendCode,
     ) -> MyResult<FileTransferClient> {
-        let path = std::path::Path::new(url.trim_start_matches("file://"));
+        let path = Url::parse(&url)?
+            .to_file_path()
+            .map_err(|_| format!("Invalid url {:?}", url))?;
         let file_name = path
             .file_name()
             .ok_or_else(|| format!("Invalid url {}", url))?;
@@ -168,7 +182,7 @@ impl FileTransferClient {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.finished_flag.load(Ordering::Acquire)
+        self.finished_flag.load(Ordering::SeqCst)
     }
 
     pub fn url(&self) -> &str {
@@ -191,7 +205,10 @@ impl FileTransferClient {
     }
 
     fn stop(&mut self) -> MyResult<()> {
-        let thread_handle = self.handle.replace(None).ok_or("This should be unreachable?" )?;
+        let thread_handle = self
+            .handle
+            .replace(None)
+            .ok_or("This should be unreachable?")?;
         thread_handle.join().map_err(|e| {
             if let Some(serr) = e.downcast_ref::<String>() {
                 format!("File transfer panic: String {{ {} }}", serr)
@@ -218,24 +235,33 @@ fn file_transfer_client_thread(
     mut file: File,
     finished_flag: Arc<AtomicBool>,
 ) -> MyResult<JoinHandle<()>> {
-    let mut connection = TcpStream::connect(remote)?;
+    let mut connection = TcpStream::connect_timeout(&remote, Duration::from_secs(30))?;
+    connection.set_nonblocking(true)?;
     let mut buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE);
 
-    let handle = thread::spawn(move || {
+    let handle = thread::Builder::new().name("FTC thread".to_owned()).spawn(move || {
         loop {
-            let mut cur_pos = progress.write().unwrap();
-            if *cur_pos >= file_size {
+            let cur_pos = *progress.read().unwrap();
+            if cur_pos >= file_size {
                 break;
             }
-            let buffer_size = BUFFER_SIZE.min((file_size - *cur_pos) as usize);
+            let buffer_size = BUFFER_SIZE.min((file_size - cur_pos) as usize);
             buffer.resize(buffer_size, 0);
-            let read = connection.read(&mut buffer).unwrap();
-            let read_slice = &buffer[..read];
-            file.write_all(read_slice).unwrap();
-            *cur_pos += read as u64;
-            thread::sleep(Duration::from_millis(5));
+            let read = match connection.read(&mut buffer) {
+                Ok(b) => b, 
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => 0, 
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => 0, 
+                e => e.unwrap(),
+            };
+            if read > 0 {
+                let read_slice = &buffer[..read];
+                file.write_all(read_slice).unwrap();
+                file.flush().unwrap();
+                *progress.write().unwrap() = cur_pos + read as u64;
+            }
+            thread::yield_now();
         }
-        finished_flag.store(true, Ordering::Acquire);
-    });
+        finished_flag.store(true, Ordering::SeqCst);
+    })?;
     Ok(handle)
 }
