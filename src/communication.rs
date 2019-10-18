@@ -22,8 +22,7 @@ mod networking;
 pub use networking::*;
 
 mod eventgroup;
-use eventgroup::{PlayerEventGroup, priority_ordering};
-
+use eventgroup::{priority_ordering, PlayerEventGroup};
 
 impl<T> DebugError for std::sync::PoisonError<T> {
     fn message(self) -> String {
@@ -267,7 +266,8 @@ impl ConnnectionThread {
         Ok(retvl)
     }
     fn broadcast_events(&mut self, events: PlayerEventGroup) -> MyResult<()> {
-        for evt in events.into_events() {
+        let events: Vec<_> = events.into_events().collect();
+        for evt in events {
             let event_blocks = evt.as_blocks();
             for block in event_blocks {
                 let all_streams = self
@@ -322,7 +322,8 @@ impl ConnnectionThread {
 
         self.broadcast_events(rectified_self).unwrap();
 
-        for evt in cascaded_remotes.into_events() {
+        let events_to_send: Vec<_> = cascaded_remotes.into_events().collect();
+        for evt in events_to_send {
             self.event_recv.as_ref().unwrap().send(evt).unwrap();
         }
     }
@@ -385,10 +386,12 @@ impl ConnnectionThread {
     }
     pub fn start(mut self) -> MyResult<ConnectionsThreadHandle> {
         let local_handle = self.start_sync()?;
-        let thread_handle = thread::spawn(move || loop {
-            self.tick();
-            thread::yield_now();
-        });
+        let thread_handle = thread::Builder::new()
+            .name("Connections Thread".to_owned())
+            .spawn(move || loop {
+                self.tick();
+                thread::yield_now();
+            })?;
         *local_handle.background_thread.write().unwrap() = Some(thread_handle);
         Ok(local_handle)
     }
@@ -474,11 +477,11 @@ fn is_disconnection_error(e: &io::Error) -> bool {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
     use std::net::Ipv4Addr;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_test_thread(
         addr: impl Into<SocketAddr>,
@@ -607,7 +610,10 @@ mod test {
         client_thread.tick();
 
         let jump_evt = RemoteEvent::Jump(Duration::from_millis(3000));
-        let ping_evt = RemoteEvent::Ping(Duration::from_millis(3000).into());
+        let ping_evt = RemoteEvent::Ping {
+            payload: Duration::from_millis(3000).into(),
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
+        };
         if host_has_priority {
             client_handle.send_event(jump_evt.clone()).unwrap();
             host_handle.send_event(ping_evt.clone()).unwrap();
@@ -652,7 +658,10 @@ mod test {
         host_thread.tick();
         client_thread.tick();
 
-        let ping_evt = RemoteEvent::Ping(Duration::from_millis(3000).into());
+        let ping_evt = RemoteEvent::Ping {
+            payload: Duration::from_millis(3000).into(),
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
+        };
         if host_has_priority {
             client_handle.send_event(ping_evt.clone()).unwrap();
             client_handle.send_event(RemoteEvent::Play).unwrap();

@@ -7,6 +7,7 @@ pub struct PlayerEventGroup {
     is_paused: Option<bool>,
     did_jump: bool,
     position: Option<Duration>,
+    position_reference : Option<Duration>,
 }
 
 impl Default for PlayerEventGroup {
@@ -32,6 +33,7 @@ impl PlayerEventGroup {
             is_paused: None,
             did_jump: false,
             position: None,
+            position_reference : None, 
         }
     }
 
@@ -44,6 +46,7 @@ impl PlayerEventGroup {
             RemoteEvent::Play => self.is_paused = Some(false),
             RemoteEvent::Jump(dt) => {
                 self.position = Some(dt);
+                self.position_reference = None;
                 self.did_jump = true;
             }
             RemoteEvent::MediaOpen(_) => {
@@ -58,8 +61,11 @@ impl PlayerEventGroup {
             | RemoteEvent::RespondTransfer { .. } => {
                 self.media_open_event.insert(0, event);
             }
-            RemoteEvent::Ping(png) => {
-                self.position.get_or_insert(png.time());
+            RemoteEvent::Ping {
+                payload, timestamp
+            } => {
+                self.position.get_or_insert(payload.time());
+                self.position_reference.get_or_insert(timestamp);
             }
             RemoteEvent::Shutdown => {
                 return PlayerEventGroup::new();
@@ -79,15 +85,20 @@ impl PlayerEventGroup {
                 }
             })
             .into_iter();
-        let media_event = self.media_open_event.into_iter();
         let position_event = if self.did_jump {
             let pos = self.position.unwrap(); //(Duration::from_micros(0));
             Some(RemoteEvent::Jump(pos)).into_iter()
         } else {
-            self.position
-                .map(|p| RemoteEvent::Ping(p.into()))
+            self.position.and_then(|pos| self.position_reference.map(|rf| ((pos).into(), rf)))
+                .map(|(payload, timestamp)| {
+                    RemoteEvent::Ping {
+                        payload, 
+                        timestamp, 
+                    }
+                })
                 .into_iter()
         };
+        let media_event = self.media_open_event.into_iter();
         media_event.chain(position_event).chain(status_event)
     }
 
@@ -117,11 +128,17 @@ impl PlayerEventGroup {
             rectified_self
                 .media_open_event
                 .extend_from_slice(&other.media_open_event);
+            let position_reference = if rectified_self.did_jump || other.did_jump {
+                None 
+            } else {
+                rectified_self.position_reference.or(other.position_reference)
+            };
             PlayerEventGroup {
                 media_open_event: rectified_self.media_open_event,
                 is_paused: rectified_self.is_paused.or(other.is_paused),
                 did_jump: rectified_self.did_jump || other.did_jump,
                 position: rectified_self.position.or(other.position),
+                position_reference,
             }
         }
     }
@@ -173,6 +190,9 @@ impl PlayerEventGroup {
         } else {
             None
         };
+        if !retvl.did_jump && retvl.position.is_some() {
+            retvl.position_reference = self.position_reference;
+        }
         retvl
     }
 }
@@ -213,16 +233,23 @@ pub(crate) fn priority_ordering(self_addr: SocketAddr, other_addr: SocketAddr) -
 
 #[cfg(test)]
 mod test {
+use std::time::{SystemTime, UNIX_EPOCH};
     use super::*;
     #[test]
     fn test_ip_priority() {
         let ip_a = SocketAddr::from(([192, 168, 1, 32], 49111));
         let events_a = PlayerEventGroup::new()
-            .with_event(RemoteEvent::Ping(Duration::from_millis(10_000).into()))
+            .with_event(RemoteEvent::Ping {
+                payload : Duration::from_millis(10_000).into(),
+                timestamp : SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
+            })
             .with_event(RemoteEvent::Pause);
         let ip_b = SocketAddr::from(([128, 14, 1, 32], 4));
         let events_b = PlayerEventGroup::new()
-            .with_event(RemoteEvent::Ping(Duration::from_millis(1_000).into()))
+            .with_event(RemoteEvent::Ping {
+                payload : Duration::from_millis(1_000).into(),
+                timestamp : SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
+            })
             .with_event(RemoteEvent::Play);
 
         let rectified_b = events_b.clone().rectify(ip_b, &events_a, ip_a);
@@ -242,7 +269,10 @@ mod test {
             .with_event(RemoteEvent::Pause);
         let ip_b = SocketAddr::from(([128, 14, 1, 32], 4));
         let events_b = PlayerEventGroup::new()
-            .with_event(RemoteEvent::Ping(Duration::from_millis(1_000).into()))
+            .with_event(RemoteEvent::Ping {
+                payload : Duration::from_millis(1_000).into(),
+                timestamp : SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
+            })
             .with_event(RemoteEvent::Play);
 
         let rectified_b = events_b.clone().rectify(ip_b, &events_a, ip_a);

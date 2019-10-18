@@ -9,9 +9,11 @@ use crate::{DebugError, MyResult};
 use std::net::SocketAddr;
 use std::sync::{self, Arc, Mutex, RwLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Eq, PartialEq, Default)]
+use url::Url;
+
+#[derive(Clone, Eq, PartialEq, Default, Debug)]
 pub struct MediaOpenState {
     kind: MediaOpenStateKind,
     url: Option<String>,
@@ -65,7 +67,7 @@ impl MediaOpenState {
     }
 }
 
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub enum MediaOpenStateKind {
     Broadcasting,
     Requesting,
@@ -159,7 +161,7 @@ impl AppState {
 
         let (callback, event_sink) = sync::mpsc::channel();
 
-        let handle = thread::spawn(move || loop {
+        let handle = thread::Builder::new().name("Local event thread".to_owned()).spawn(move || loop {
             let cur_time = Instant::now();
             let ellapsed = cur_time - prev_time;
             let mut player_lock = player_ref.lock().unwrap();
@@ -170,6 +172,7 @@ impl AppState {
                 if cur_state_bad {
                     *state_ref.write().unwrap() = MediaOpenState::default();
                 }
+                thread::yield_now();
                 continue;
             }
             let new_transfer = player_events.iter().find(|evt| {
@@ -190,12 +193,10 @@ impl AppState {
                 for evt in player_events {
                     comms_ref.send_event(evt.into()).unwrap();
                 }
-                comms_ref
-                    .send_event(RemoteEvent::Ping(player_lock.ping().unwrap()))
-                    .unwrap();
             } else if !player_events.iter().all(|evt| evt != &PlayerEvent::Play) {
                 player_lock.send_event(PlayerEvent::Pause).unwrap();
             }
+            let mut should_ping = !has_transfer;
             for evt in remote_events {
                 match evt {
                     RemoteEvent::Jump(tm) => {
@@ -213,53 +214,46 @@ impl AppState {
                             player_lock.send_event(PlayerEvent::Play).unwrap();
                         }
                     }
-                    RemoteEvent::Ping(png) => {
+                    RemoteEvent::Ping { payload, timestamp } => {
+                        should_ping = false;
                         if !has_transfer {
-                            player_lock.on_ping(png).unwrap();
+                            player_lock.on_ping(payload, timestamp).unwrap();
                         }
                     }
                     RemoteEvent::MediaOpen(ref url) => {
-                        let needs_transition = {
-                            let state = state_ref.read().unwrap();
-                            if let Some(ref old_url) = state.url {
-                                if state.kind == MediaOpenStateKind::Okay {
-                                    old_url != url
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        };
-                        if needs_transition {
-                            player_lock.send_event(PlayerEvent::Pause).unwrap();
-                            *state_ref.write().unwrap() =
-                                MediaOpenState::requesting().with_url(url.to_owned());
-                            callback.send(evt).unwrap();
-                            break;
-                        } else {
-                            comms_ref
-                                .send_event(RemoteEvent::MediaOpenOkay(url.to_owned()))
-                                .unwrap();
-                        }
+                        player_lock.send_event(PlayerEvent::Pause).unwrap();
+                        *state_ref.write().unwrap() =
+                            MediaOpenState::requesting().with_url(url.to_owned());
+                        callback.send(evt).unwrap();
+                        break;
                     }
                     RemoteEvent::RequestTransfer(ref url) => {
-                        if state_ref.read().unwrap().is_broadcasting(url) {
+                        let state = state_ref.read().unwrap();
+                        if state.is_broadcasting(url) {
                             callback.send(evt).unwrap();
+                        }
+                        else {
+                            println!(" MEDIA: WARN: Cannot deal with Request Transfer when our state is {:?}", state);
                         }
                     }
                     RemoteEvent::RespondTransfer { .. } => {
-                        if MediaOpenStateKind::Requesting == state_ref.read().unwrap().kind {
+                        let state_kind = state_ref.read().unwrap().kind;
+                        if MediaOpenStateKind::Requesting == state_kind {
                             callback.send(evt).unwrap();
+                        }
+                        else {
+                            println!(" MEDIA: WARN: Cannot deal with Respond Transfer when our state is {:?}", state_kind);
                         }
                     }
                     RemoteEvent::MediaOpenOkay(ref url) => {
-                        let state = state_ref.read().unwrap();
-                        let is_good = state.is_broadcasting(url)
-                            || state.is_transfering(url)
-                            || state.is_requesting(url);
+                        let is_good = {
+                            let state = state_ref.read().unwrap();
+                            state.is_broadcasting(url)
+                                || state.is_transfering(url)
+                                || state.is_requesting(url)
+                        };
                         if !is_good {
-                            println!("WARN: got MediaOpenOkay({}) without being in the middle of a broadcast!", url);
+                            println!(" MEDIA: WARN: got MediaOpenOkay({}) without being in the middle of a broadcast!", url);
                         } else {
                             *state_ref.write().unwrap() =
                                 MediaOpenState::okay().with_url(url.clone());
@@ -269,9 +263,17 @@ impl AppState {
                     RemoteEvent::Shutdown => {}
                 }
             }
+            if should_ping {
+                comms_ref
+                    .send_event(RemoteEvent::Ping {
+                        payload: player_lock.ping().unwrap(),
+                        timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
+                    })
+                    .unwrap();
+            }
             prev_time = cur_time;
-            std::thread::sleep(Duration::from_millis(20));
-        });
+            std::thread::yield_now();
+        })?;
         self.local_event_thread = Some(handle);
         self.local_event_recv = Some(event_sink);
         Ok(())
@@ -287,11 +289,11 @@ impl AppState {
 
     pub fn broadcast_transfer_host(&mut self, url: &str) -> MyResult<()> {
         if !self.state.read().unwrap().is_broadcasting(url) {
-            return Err(format!(
-                "ERROR: got transfer request for {} when not broadcasting!",
+            println!(
+                "WARNING: got transfer request for {} when not broadcasting!",
                 url
-            )
-            .into());
+            );
+            return Ok(());
         }
         let transfer_host = self.get_transfer_host(url).ok_or_else(|| {
             format!(
@@ -355,23 +357,30 @@ impl AppState {
                 .find(|t| t.url() == url)
                 .map(|c| c.local_file_path())
                 .ok_or_else(|| format!("Error: cannot find local file for url {}", url))?;
-            let local_path_str = local_path
-                .to_str()
-                .ok_or_else(|| format!("Error: could not parse path {:?}.", local_path))?;
-            format!("file://{}", local_path_str)
+            let pt = if local_path.is_absolute() {
+                local_path.to_owned()
+            } 
+            else {
+                let mut p = std::env::current_dir().unwrap();
+                p.push(local_path);
+                p
+            };
+            match Url::from_file_path(&pt) {
+                Ok(url) => url.into_string(), 
+                Err(_) => format!("file://{}", local_path.to_str().unwrap())
+            }
         } else {
             url.clone()
         };
-        if let Some(thrd) = &mut self.comms {
-            thrd.send_event(RemoteEvent::MediaOpenOkay(url.clone()))?;
-        } else {
-            return Err("ERROR: comms thread panic before we could respond to the okay!".into());
-        }
         if let Some(player_mutex) = self.player.as_ref() {
             let mut lock = player_mutex.lock().map_err(DebugError::into_myerror)?;
             lock.send_event(PlayerEvent::MediaOpen(local_url))?;
             *(self.state.write().unwrap()) = MediaOpenState::okay().with_url(url.clone());
-            Ok(())
+            if let Some(thrd) = &mut self.comms {
+                thrd.send_event(RemoteEvent::MediaOpenOkay(url.clone()))
+            } else {
+                Err("ERROR: comms thread panic before we could respond to the okay!".into())
+            }
         } else {
             Err(format!("ERROR: no player found to open local file {}!", local_url).into())
         }
@@ -415,12 +424,5 @@ impl AppState {
                     MyResult::Err(sync::mpsc::TryRecvError::Disconnected.into()).unwrap()
                 }
             })
-    }
-
-    pub fn comms_thread_up(&self) -> bool {
-        self.comms
-            .as_ref()
-            .map(|c| !c.has_paniced())
-            .unwrap_or(false)
     }
 }

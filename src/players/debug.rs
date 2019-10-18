@@ -5,7 +5,7 @@ use crate::MyResult;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub enum DebugEventSink {
     StdOut,
@@ -29,7 +29,7 @@ impl Write for DebugEventSink {
 
 pub struct SinkDebugPlayer {
     previous_ping: TimePing,
-    previous_ping_time: Instant,
+    previous_ping_time: SystemTime,
     sink: DebugEventSink,
 }
 
@@ -37,7 +37,7 @@ impl SinkDebugPlayer {
     pub fn new(sink: DebugEventSink) -> Self {
         Self {
             previous_ping: TimePing::from_micros(0),
-            previous_ping_time: Instant::now(),
+            previous_ping_time: SystemTime::now(),
             sink,
         }
     }
@@ -139,7 +139,9 @@ impl MediaPlayer for DebugPlayer {
     fn ping(&self) -> MyResult<TimePing> {
         match self {
             DebugPlayer::Sink(s) => {
-                let dt = Instant::now() - s.previous_ping_time;
+                let dt = SystemTime::now()
+                    .duration_since(s.previous_ping_time)
+                    .unwrap();
                 let ping_time = s.previous_ping.time() + dt;
                 Ok(TimePing::from_duration(ping_time))
             }
@@ -147,22 +149,24 @@ impl MediaPlayer for DebugPlayer {
                 let dt = if s.is_paused {
                     Duration::from_nanos(0)
                 } else {
-                    Instant::now() - s.last_position_modification
+                    SystemTime::now()
+                        .duration_since(s.last_position_modification)
+                        .unwrap()
                 };
                 let new_pos = s.last_position + dt;
                 Ok(TimePing::from_duration(new_pos))
             }
         }
     }
-    fn on_ping(&mut self, ping: TimePing) -> MyResult<()> {
+    fn on_ping(&mut self, ping: TimePing, reference: Duration) -> MyResult<()> {
         match self {
             DebugPlayer::Sink(s) => {
                 s.previous_ping = ping;
-                s.previous_ping_time = Instant::now();
+                s.previous_ping_time = UNIX_EPOCH + reference
             }
             DebugPlayer::Socket(s) => {
                 s.last_position = ping.time();
-                s.last_position_modification = Instant::now();
+                s.last_position_modification = UNIX_EPOCH + reference
             }
         }
         Ok(())
@@ -170,7 +174,7 @@ impl MediaPlayer for DebugPlayer {
 }
 
 pub struct SocketDebugPlayer {
-    last_position_modification: Instant,
+    last_position_modification: SystemTime,
     last_position: Duration,
     is_paused: bool,
     listener: TcpListener,
@@ -213,7 +217,7 @@ impl MediaPlayerList for DebugPlayerList {
             "Socket based" => {
                 let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 49234)))?;
                 let player = SocketDebugPlayer {
-                    last_position_modification: Instant::now(),
+                    last_position_modification: SystemTime::now(),
                     last_position: Duration::from_nanos(0),
                     is_paused: false,
                     listener,

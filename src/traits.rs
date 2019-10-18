@@ -7,7 +7,7 @@ pub trait MediaPlayer: Send {
     fn send_event(&mut self, event: PlayerEvent) -> MyResult<()>;
     fn check_events(&mut self, time_since_previous: Duration) -> MyResult<Vec<PlayerEvent>>;
     fn ping(&self) -> MyResult<TimePing>;
-    fn on_ping(&mut self, ping: TimePing) -> MyResult<()>;
+    fn on_ping(&mut self, ping: TimePing, reference : Duration) -> MyResult<()>;
 }
 
 pub trait MediaPlayerList {
