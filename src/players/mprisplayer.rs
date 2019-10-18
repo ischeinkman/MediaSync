@@ -3,10 +3,12 @@ use crate::traits::{MediaPlayer, MediaPlayerList};
 use crate::{DebugError, MyResult};
 use mpris;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const POSITION_ERROR_MARGIN: Duration = Duration::from_millis(300);
+const POSITION_ERROR_MARGIN: Duration = Duration::from_millis(500);
 const JUMP_ERROR_MARGIN: Duration = Duration::from_millis(1000);
+const TIME_OFFSET: Duration =
+    Duration::from_millis(((POSITION_ERROR_MARGIN.as_millis() * 50) / 100) as u64);
 
 pub struct MprisPlayerHandle<'a> {
     name: String,
@@ -18,7 +20,7 @@ pub struct MprisPlayerHandle<'a> {
 pub struct PlayerStatus {
     is_paused: bool,
     track_id: Option<mpris::TrackID>,
-    track_url: Option<String>,
+    track_meta: Option<mpris::Metadata>,
     position: Duration,
 }
 
@@ -43,11 +45,30 @@ impl PlayerStatus {
     pub fn events_since(&self, dt: Duration, previous: Option<&PlayerStatus>) -> Vec<PlayerEvent> {
         let mut retvl = Vec::new();
         let prev_id = previous.and_then(|p| p.track_id.as_ref());
-        let prev_url = previous.and_then(|p| p.track_url.as_ref());
-        if self.track_id.as_ref() != prev_id && self.track_url.as_ref() != prev_url {
-            retvl.push(PlayerEvent::MediaOpen(
-                self.track_url.as_ref().cloned().unwrap_or_else(String::new),
-            ));
+        if self.track_id.as_ref() != prev_id {
+            let cur_url = self.track_meta.as_ref().and_then(|m| m.url());
+            let cur_status = self
+                .track_meta
+                .as_ref()
+                .and_then(|m| match m.get("status") {
+                    Some(mpris::MetadataValue::String(s)) => Some(s.as_ref()),
+                    _ => None,
+                });
+            let prev_url = previous
+                .as_ref()
+                .and_then(|p| p.track_meta.as_ref())
+                .and_then(|m| m.url());
+            let prev_status = previous
+                .as_ref()
+                .and_then(|p| p.track_meta.as_ref())
+                .and_then(|m| match m.get("status") {
+                    Some(mpris::MetadataValue::String(s)) => Some(s.as_ref()),
+                    _ => None,
+                });
+            if cur_url != prev_url && cur_url != prev_status && (cur_status != prev_url || prev_url.is_none()) {
+                let new_url = cur_url.or(cur_status).unwrap_or("");
+                retvl.push(PlayerEvent::MediaOpen(new_url.to_owned()));
+            }
         }
         let needs_jump = previous.map_or(true, |prev| {
             if prev.position > self.position {
@@ -90,27 +111,25 @@ impl<'a> MprisPlayerHandle<'a> {
             .map(|m| m.track_id())
     }
     fn current_status(&self) -> MyResult<PlayerStatus> {
-        let is_paused = self
+        let playstatus = self
             .player
             .get_playback_status()
-            .map_err(DebugError::into_myerror)?
-            == mpris::PlaybackStatus::Paused;
-        let track_id = self.current_trackid()?;
+            .map_err(DebugError::into_myerror)?;
+        let is_paused = playstatus != mpris::PlaybackStatus::Playing;
         let position = self
             .player
             .get_position()
             .map_err(DebugError::into_myerror)?;
-        let track_url: Option<String> = self
+        let meta = self
             .player
             .get_metadata()
-            .map_err(|e| format!("mpris::MetadataError: {:?}", e))?
-            .url()
-            .map(|s| s.to_owned());
+            .map_err(|e| format!("mpris::MetadataError: {:?}", e))?;
+        let track_id = meta.track_id();
         Ok(PlayerStatus {
             is_paused,
             track_id,
             position,
-            track_url,
+            track_meta: Some(meta),
         })
     }
 }
@@ -126,11 +145,11 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
                     Some(t) => t,
                     None => return Ok(()),
                 };
+                let adapted_time = *time + TIME_OFFSET;
                 self.player
-                    .set_position(current_track_id, &time)
+                    .set_position(current_track_id, &adapted_time)
                     .map_err(DebugError::into_myerror)?;
                 self.player.play().map_err(DebugError::into_myerror)?;
-
             }
             PlayerEvent::Pause => {
                 self.player.pause().map_err(DebugError::into_myerror)?;
@@ -157,13 +176,21 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
         Ok(TimePing::from(current_time))
     }
 
-    fn on_ping(&mut self, ping: TimePing) -> MyResult<()> {
+    fn on_ping(&mut self, ping: TimePing, reference_timestamp: Duration) -> MyResult<()> {
         let status = self.current_status()?;
-        let current_time = status.position;
-        let difference = if current_time > ping.time() {
-            current_time - ping.time()
+        let expected_time = if status.is_paused {
+            ping.time()
         } else {
-            ping.time() - current_time
+            let time_since_ping = SystemTime::now()
+                .duration_since(UNIX_EPOCH + reference_timestamp)
+                .unwrap();
+            ping.time() + time_since_ping
+        };
+        let current_time = status.position;
+        let difference = if current_time > expected_time {
+            current_time - expected_time
+        } else {
+            expected_time - current_time
         };
         if difference > POSITION_ERROR_MARGIN {
             let current_track = if let Some(t) = self.current_trackid()? {
@@ -171,7 +198,19 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
             } else {
                 return Ok(());
             };
-            let adapted_time = ping.time() + (POSITION_ERROR_MARGIN * 50) / 100;
+            let adapted_time = ping.time() + TIME_OFFSET;
+            println!(
+                "Ping correction: {}{} over margin ({} , {}) => {}",
+                if current_time > expected_time {
+                    "+"
+                } else {
+                    "-"
+                },
+                (difference - POSITION_ERROR_MARGIN).as_millis(),
+                current_time.as_millis(),
+                ping.time().as_millis(),
+                adapted_time.as_millis()
+            );
             self.player
                 .set_position(current_track, &adapted_time)
                 .map_err(DebugError::into_myerror)?;
@@ -189,7 +228,7 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
         let current_status = self.current_status()?;
         let raw_evts =
             current_status.events_since(time_since_previous, self.previous_status.as_ref());
-        let retvl = raw_evts
+        let retvl: Vec<PlayerEvent> = raw_evts
             .into_iter()
             .filter(|evt| match evt {
                 PlayerEvent::Pause => !self
