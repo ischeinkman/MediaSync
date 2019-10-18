@@ -73,9 +73,7 @@ pub fn map_args(parsed: ArgMatches<'_>) -> Args {
         .values_of("connections")
         .into_iter()
         .flat_map(|v| v)
-        .map(|arg| {
-            FriendCode::from_code(arg).unwrap()
-        })
+        .map(|arg| FriendCode::from_code(arg).unwrap())
         .collect();
     retvl.connect_to = connections;
     retvl.open_public = parsed.is_present("public");

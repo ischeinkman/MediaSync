@@ -26,13 +26,10 @@ impl TimePing {
     pub fn time(&self) -> Duration {
         self.time
     }
-
 }
 
 impl From<Duration> for TimePing {
     fn from(time: Duration) -> TimePing {
-        TimePing { 
-            time 
-        }
+        TimePing { time }
     }
 }

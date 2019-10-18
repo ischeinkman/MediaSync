@@ -1,6 +1,6 @@
+use crate::communication::networking::PublicAddr;
 use crate::communication::FriendCode;
 use crate::communication::*;
-use crate::communication::networking::PublicAddr;
 use crate::MyResult;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -94,43 +94,45 @@ fn file_transfer_host_thread(
     let mut connections: Vec<TcpStream> = Vec::new();
     let mut positions: HashMap<SocketAddr, u64> = HashMap::new();
     let mut buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE);
-    let handle = thread::Builder::new().name("FTH thread".to_owned()).spawn(move || loop {
-        if die_flag.load(Ordering::SeqCst) {
-            return;
-        }
-        match listener.accept() {
-            Ok((stream, addr)) => {
-                connections.push(stream);
-                positions.insert(addr, 0);
+    let handle = thread::Builder::new()
+        .name("FTH thread".to_owned())
+        .spawn(move || loop {
+            if die_flag.load(Ordering::SeqCst) {
+                return;
             }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            e => {
-                e.unwrap();
-            }
-        }
-        connections = connections
-            .into_iter()
-            .filter(|mut c| {
-                let pos = positions.get_mut(&c.peer_addr().unwrap()).unwrap();
-                if *pos >= file_size {
-                    return false;
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    connections.push(stream);
+                    positions.insert(addr, 0);
                 }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                e => {
+                    e.unwrap();
+                }
+            }
+            connections = connections
+                .into_iter()
+                .filter(|mut c| {
+                    let pos = positions.get_mut(&c.peer_addr().unwrap()).unwrap();
+                    if *pos >= file_size {
+                        return false;
+                    }
 
-                let bytes_left = file_size - *pos;
-                let buffer_size = (BUFFER_SIZE as u64).min(bytes_left);
-                buffer.resize(buffer_size as usize, 0);
-                file.seek(SeekFrom::Start(*pos as u64)).unwrap();
-                let read = file.read(&mut buffer).unwrap();
-                c.write_all(&buffer[..read]).unwrap();
-                *pos += read as u64;
+                    let bytes_left = file_size - *pos;
+                    let buffer_size = (BUFFER_SIZE as u64).min(bytes_left);
+                    buffer.resize(buffer_size as usize, 0);
+                    file.seek(SeekFrom::Start(*pos as u64)).unwrap();
+                    let read = file.read(&mut buffer).unwrap();
+                    c.write_all(&buffer[..read]).unwrap();
+                    *pos += read as u64;
 
-                true
-            })
-            .collect();
-        if connections.is_empty() {
-            thread::yield_now();
-        }
-    })?;
+                    true
+                })
+                .collect();
+            if connections.is_empty() {
+                thread::yield_now();
+            }
+        })?;
 
     Ok(handle)
 }
@@ -239,29 +241,31 @@ fn file_transfer_client_thread(
     connection.set_nonblocking(true)?;
     let mut buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE);
 
-    let handle = thread::Builder::new().name("FTC thread".to_owned()).spawn(move || {
-        loop {
-            let cur_pos = *progress.read().unwrap();
-            if cur_pos >= file_size {
-                break;
+    let handle = thread::Builder::new()
+        .name("FTC thread".to_owned())
+        .spawn(move || {
+            loop {
+                let cur_pos = *progress.read().unwrap();
+                if cur_pos >= file_size {
+                    break;
+                }
+                let buffer_size = BUFFER_SIZE.min((file_size - cur_pos) as usize);
+                buffer.resize(buffer_size, 0);
+                let read = match connection.read(&mut buffer) {
+                    Ok(b) => b,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => 0,
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
+                    e => e.unwrap(),
+                };
+                if read > 0 {
+                    let read_slice = &buffer[..read];
+                    file.write_all(read_slice).unwrap();
+                    file.flush().unwrap();
+                    *progress.write().unwrap() = cur_pos + read as u64;
+                }
+                thread::yield_now();
             }
-            let buffer_size = BUFFER_SIZE.min((file_size - cur_pos) as usize);
-            buffer.resize(buffer_size, 0);
-            let read = match connection.read(&mut buffer) {
-                Ok(b) => b, 
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => 0, 
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => 0, 
-                e => e.unwrap(),
-            };
-            if read > 0 {
-                let read_slice = &buffer[..read];
-                file.write_all(read_slice).unwrap();
-                file.flush().unwrap();
-                *progress.write().unwrap() = cur_pos + read as u64;
-            }
-            thread::yield_now();
-        }
-        finished_flag.store(true, Ordering::SeqCst);
-    })?;
+            finished_flag.store(true, Ordering::SeqCst);
+        })?;
     Ok(handle)
 }

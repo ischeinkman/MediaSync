@@ -4,8 +4,8 @@ use std::time::Duration;
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
 pub enum RemoteEvent {
-    Ping{
-        timestamp : Duration, 
+    Ping {
+        timestamp: Duration,
         payload: TimePing,
     },
     Pause,
@@ -68,7 +68,7 @@ impl From<RemoteEventKind> for u8 {
 impl RemoteEvent {
     pub fn kind(&self) -> RemoteEventKind {
         match self {
-            RemoteEvent::Ping{..} => RemoteEventKind::Ping,
+            RemoteEvent::Ping { .. } => RemoteEventKind::Ping,
             RemoteEvent::Pause => RemoteEventKind::Pause,
             RemoteEvent::Play => RemoteEventKind::Play,
             RemoteEvent::Jump(_) => RemoteEventKind::Jump,
@@ -88,11 +88,11 @@ impl RemoteEvent {
             RemoteEventKind::Ping => {
                 let ping_micros = next.count_u64();
                 let ping = TimePing::from_micros(ping_micros);
-                let mut ts_bytes = [0 ; 8];
+                let mut ts_bytes = [0; 8];
                 (&mut ts_bytes).copy_from_slice(&next.payload()[..8]);
                 let timestamp = Duration::from_micros(u64::from_le_bytes(ts_bytes));
                 (Some(RemoteEvent::Ping {
-                    payload : ping, 
+                    payload: ping,
                     timestamp,
                 }))
             }
@@ -136,15 +136,15 @@ impl RemoteEvent {
     }
     pub fn as_blocks(&self) -> Vec<RawBlock> {
         match self {
-            RemoteEvent::Ping{timestamp, payload} => {
+            RemoteEvent::Ping { timestamp, payload } => {
                 let png_micros = payload.as_micros();
-                let timestamp_micros = timestamp.as_micros() as u64; 
+                let timestamp_micros = timestamp.as_micros() as u64;
                 let ts_bytes = timestamp_micros.to_le_bytes();
                 let retvl = RawBlock::new()
                     .with_kind(self.kind())
                     .with_count_u64(png_micros)
                     .with_payload(&ts_bytes);
-                
+
                 vec![retvl]
             }
             RemoteEvent::Pause => vec![RawBlock::new().with_kind(self.kind())],
@@ -431,11 +431,14 @@ mod tests {
     fn test_ping_parsing() {
         let mut parser = BlockParser::new();
         let ping_time = 1000 * 1000 * 60 * 132;
-        let now_duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
+        let now_duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
 
-        let ping = RemoteEvent::Ping{ 
-            payload : TimePing::from_micros(ping_time),
-            timestamp : Duration::from_micros(now_duration as u64), 
+        let ping = RemoteEvent::Ping {
+            payload: TimePing::from_micros(ping_time),
+            timestamp: Duration::from_micros(now_duration as u64),
         };
         let mut ping_raw = ping.as_blocks();
         assert_eq!(1, ping_raw.len());

@@ -65,7 +65,10 @@ impl PlayerStatus {
                     Some(mpris::MetadataValue::String(s)) => Some(s.as_ref()),
                     _ => None,
                 });
-            if cur_url != prev_url && cur_url != prev_status && (cur_status != prev_url || prev_url.is_none()) {
+            if cur_url != prev_url
+                && cur_url != prev_status
+                && (cur_status != prev_url || prev_url.is_none())
+            {
                 let new_url = cur_url.or(cur_status).unwrap_or("");
                 retvl.push(PlayerEvent::MediaOpen(new_url.to_owned()));
             }

@@ -160,15 +160,18 @@ fn simpleui_request_transfer(
     state.request_transfer(url.to_owned())?;
     println!("Now waiting for a response ...");
     let wait_start = Instant::now();
-    let response = 'resp : loop {
+    let response = 'resp: loop {
         if Instant::now() - wait_start > timeout {
             break None;
         }
         while let Some(evt) = state.pop_event() {
-            if let RemoteEvent::RespondTransfer {size, transfer_code} = evt {
+            if let RemoteEvent::RespondTransfer {
+                size,
+                transfer_code,
+            } = evt
+            {
                 break 'resp transfer_code.map(|c| (size, c));
-            }
-            else {
+            } else {
             }
         }
         thread::yield_now();

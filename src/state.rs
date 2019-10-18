@@ -359,15 +359,14 @@ impl AppState {
                 .ok_or_else(|| format!("Error: cannot find local file for url {}", url))?;
             let pt = if local_path.is_absolute() {
                 local_path.to_owned()
-            } 
-            else {
+            } else {
                 let mut p = std::env::current_dir().unwrap();
                 p.push(local_path);
                 p
             };
             match Url::from_file_path(&pt) {
-                Ok(url) => url.into_string(), 
-                Err(_) => format!("file://{}", local_path.to_str().unwrap())
+                Ok(url) => url.into_string(),
+                Err(_) => format!("file://{}", local_path.to_str().unwrap()),
             }
         } else {
             url.clone()
