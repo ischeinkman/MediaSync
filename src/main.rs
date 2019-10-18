@@ -10,14 +10,13 @@ use communication::FriendCode;
 mod state;
 use state::*;
 
-use std::path::PathBuf;
-
 use std::io;
 use std::net::SocketAddr;
 use std::thread;
 use std::time::{Duration, Instant};
 
 mod clapui;
+use url::Url;
 
 type MyResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -121,7 +120,9 @@ fn simpleui_on_remote_open(url: &str) -> OnTransferAction {
 }
 
 fn simpleui_on_remote_requests_transfer(state: &mut AppState, url: &str) -> MyResult<()> {
-    let path = PathBuf::from(url.trim_start_matches("file://"));
+    let path = Url::parse(url)?
+        .to_file_path()
+        .map_err(|_| format!("Error: could not parse {:?}", url))?;
     if path.exists() && path.is_file() {
         println!("Got a request to transfer file {}.", url);
         println!("Should we perform the transfer? [y/n]");
@@ -135,13 +136,18 @@ fn simpleui_on_remote_requests_transfer(state: &mut AppState, url: &str) -> MyRe
             let transfer_host_code = transfer_host.transfer_code();
             println!(
                 "Transfer server opened using code {}.",
-                transfer_host_code
-                    .as_friend_code()
+                transfer_host_code.as_friend_code()
             );
             println!("Informing peers.");
             state.broadcast_transfer_host(&url)?;
             println!("Peers informed.");
         }
+    } else {
+        return Err(format!(
+            "Could not find path {:?}! Parsed it from URL {:?}.",
+            path, url
+        )
+        .into());
     }
     Ok(())
 }
@@ -154,19 +160,16 @@ fn simpleui_request_transfer(
     state.request_transfer(url.to_owned())?;
     println!("Now waiting for a response ...");
     let wait_start = Instant::now();
-    let response = loop {
+    let response = 'resp : loop {
         if Instant::now() - wait_start > timeout {
             break None;
         }
-        let found_event = state.pop_event().and_then(|evt| match evt {
-            RemoteEvent::RespondTransfer {
-                size,
-                transfer_code,
-            } => transfer_code.map(|c| (size, c)),
-            _ => None,
-        });
-        if found_event.is_some() {
-            break found_event;
+        while let Some(evt) = state.pop_event() {
+            if let RemoteEvent::RespondTransfer {size, transfer_code} = evt {
+                break 'resp transfer_code.map(|c| (size, c));
+            }
+            else {
+            }
         }
         thread::yield_now();
     };
@@ -198,42 +201,40 @@ pub fn main() {
     }
 
     for remote in &args.connect_to {
-        println!(
-            "Trying to connect to {}",
-            remote.as_friend_code()
-        );
+        println!("Trying to connect to {}", remote.as_friend_code());
         state.open_connection(remote.as_addr()).unwrap();
         println!("Success!");
     }
 
     let mut prev_connection_count = 0;
     loop {
-        assert!(state.comms_thread_up());
-        let pending_event = state.pop_event();
-        match pending_event {
-            Some(RemoteEvent::MediaOpen(url)) => {
-                if !url.starts_with("file:") {
-                    state.media_open_okay(url.clone()).unwrap();
-                } else {
+        while let Some(evt) = state.pop_event() {
+            match evt {
+                RemoteEvent::MediaOpen(url) => {
+                    if !url.starts_with("file:") {
+                        state.media_open_okay(url.clone()).unwrap();
+                        continue;
+                    }
                     let response = simpleui_on_remote_open(&url);
                     match response {
                         OnTransferAction::RequestTransfer => {
                             let response = simpleui_request_transfer(
                                 &mut state,
                                 &url,
-                                Duration::from_secs(30),
+                                Duration::from_secs(60),
                             )
                             .unwrap();
                             if let Some((size, code)) = response {
                                 let code = FriendCode::from_code_v4(code);
+                                println!("Now starting transfer.");
                                 state.start_transfer(url.clone(), size, code).unwrap();
                                 let transfer =
                                     state.active_transfers().find(|t| t.url() == url).unwrap();
                                 let mut prev_percent = 0.0;
                                 while !transfer.is_finished() {
                                     let cur_percent = transfer.progress();
-                                    if cur_percent - prev_percent > 10.0 {
-                                        println!("Progress: {:.2}%", cur_percent);
+                                    if cur_percent - prev_percent > 0.10 {
+                                        println!("Progress: {:.2}%", 100.0 * cur_percent);
                                         prev_percent = cur_percent;
                                     }
                                 }
@@ -247,22 +248,23 @@ pub fn main() {
                             println!("What file should be opened?");
                             let mut path_buff = String::new();
                             let _read = io::stdin().read_line(&mut path_buff).unwrap();
-                            let url = format!(
-                                "file:///{}",
-                                std::path::PathBuf::from(path_buff).to_str().unwrap()
-                            );
+                            let url = Url::from_file_path(&path_buff)
+                                .map_err(|_| {
+                                    format!("Could not format url from path {:?}", path_buff)
+                                })
+                                .unwrap();
                             println!("Now opening.");
-                            state.media_open_okay(url).unwrap();
+                            state.media_open_okay(url.into_string()).unwrap();
                             println!("Open finished.");
                         }
                         OnTransferAction::Ignore => {}
                     }
                 }
+                RemoteEvent::RequestTransfer(url) => {
+                    simpleui_on_remote_requests_transfer(&mut state, &url).unwrap();
+                }
+                _ => {}
             }
-            Some(RemoteEvent::RequestTransfer(url)) => {
-                simpleui_on_remote_requests_transfer(&mut state, &url).unwrap();
-            }
-            _ => {}
         }
         let connections = state.connections().unwrap();
         if connections.len() != prev_connection_count {
@@ -279,7 +281,6 @@ pub fn main() {
             }
             prev_connection_count = connections.len();
         }
-        thread::sleep(Duration::from_millis(100));
         thread::yield_now();
     }
 }
