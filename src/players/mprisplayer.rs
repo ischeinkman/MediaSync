@@ -224,38 +224,34 @@ impl<'a> MediaPlayer for MprisPlayerHandle<'a> {
         Ok(())
     }
 
+    #[inline(always)]
     fn check_events(&mut self, time_since_previous: Duration) -> MyResult<Vec<PlayerEvent>> {
-        if !self.player.is_running() {
-            return Ok(vec![PlayerEvent::Shutdown]);
-        }
         let current_status = self.current_status()?;
         let raw_evts =
             current_status.events_since(time_since_previous, self.previous_status.as_ref());
+        let mut skip_pause = false;
+        let mut skip_play = false;
+        let mut skip_jump = false;
+        let mut skip_open = false;
+        for evt in self.unprocessed_events.drain(..) {
+            if skip_jump && skip_open && skip_pause && skip_play {
+                break;
+            }
+            match evt {
+                PlayerEvent::Pause => skip_pause = true,
+                PlayerEvent::Play => skip_play = true,
+                PlayerEvent::Jump(_) => skip_jump = true,
+                PlayerEvent::MediaOpen(_) => skip_open = true,
+                PlayerEvent::Shutdown => {}
+            }
+        }
         let retvl: Vec<PlayerEvent> = raw_evts
             .into_iter()
             .filter(|evt| match evt {
-                PlayerEvent::Pause => !self
-                    .unprocessed_events
-                    .iter()
-                    .any(|evt| evt == &PlayerEvent::Pause),
-                PlayerEvent::Play => !self
-                    .unprocessed_events
-                    .iter()
-                    .any(|evt| evt == &PlayerEvent::Play),
-                PlayerEvent::Jump(_) => !self.unprocessed_events.iter().any(|evt| {
-                    if let PlayerEvent::Jump(_) = *evt {
-                        true
-                    } else {
-                        false
-                    }
-                }),
-                PlayerEvent::MediaOpen(_) => !self.unprocessed_events.iter().any(|evt| {
-                    if let PlayerEvent::MediaOpen(_) = *evt {
-                        true
-                    } else {
-                        false
-                    }
-                }),
+                PlayerEvent::Pause => !skip_pause,
+                PlayerEvent::Play => !skip_play,
+                PlayerEvent::Jump(_) => !skip_jump,
+                PlayerEvent::MediaOpen(_) => !skip_open,
                 _ => true,
             })
             .collect();
