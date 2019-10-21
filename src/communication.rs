@@ -389,7 +389,7 @@ impl ConnnectionThread {
             .name("Connections Thread".to_owned())
             .spawn(move || loop {
                 self.tick();
-                thread::yield_now();
+                crate::yield_thread();
             })?;
         *local_handle.background_thread.write().unwrap() = Some(thread_handle);
         Ok(local_handle)

@@ -130,7 +130,7 @@ fn file_transfer_host_thread(
                 })
                 .collect();
             if connections.is_empty() {
-                thread::yield_now();
+                crate::yield_thread();
             }
         })?;
 
@@ -263,7 +263,7 @@ fn file_transfer_client_thread(
                     file.flush().unwrap();
                     *progress.write().unwrap() = cur_pos + read as u64;
                 }
-                thread::yield_now();
+                crate::yield_thread();
             }
             finished_flag.store(true, Ordering::SeqCst);
         })?;

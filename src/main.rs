@@ -174,7 +174,7 @@ fn simpleui_request_transfer(
             } else {
             }
         }
-        thread::yield_now();
+        crate::yield_thread();
     };
     Ok(response)
 }
@@ -284,7 +284,7 @@ pub fn main() {
             }
             prev_connection_count = connections.len();
         }
-        thread::yield_now();
+        crate::yield_thread();
     }
 }
 
@@ -311,4 +311,9 @@ impl Args {
         let clap_args = clapui::init_parser();
         clapui::map_args(clap_args.get_matches())
     }
+}
+
+pub fn yield_thread() {
+    const SLEEP_TIME: Duration = Duration::from_millis(10);
+    thread::sleep(SLEEP_TIME);
 }

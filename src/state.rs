@@ -6,11 +6,11 @@ use crate::players;
 use crate::players::events::PlayerEvent;
 use crate::traits::MediaPlayer;
 use crate::{DebugError, MyResult};
+use crossbeam::{channel, Receiver, TryRecvError};
 use std::net::SocketAddr;
-use std::sync::{self, Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
 use url::Url;
 
 #[derive(Clone, Eq, PartialEq, Default, Debug)]
@@ -88,7 +88,7 @@ pub struct AppState {
     transfer_hosts: Vec<FileTransferHost>,
     transfers: Vec<FileTransferClient>,
     local_event_thread: Option<thread::JoinHandle<()>>,
-    local_event_recv: Option<sync::mpsc::Receiver<RemoteEvent>>,
+    local_event_recv: Option<Receiver<RemoteEvent>>,
     state: Arc<RwLock<MediaOpenState>>,
 }
 
@@ -159,7 +159,7 @@ impl AppState {
         let mut prev_time = Instant::now();
         let state_ref = Arc::clone(&self.state);
 
-        let (callback, event_sink) = sync::mpsc::channel();
+        let (callback, event_sink) = channel::unbounded();
 
         let handle = thread::Builder::new().name("Local event thread".to_owned()).spawn(move || loop {
             let cur_time = Instant::now();
@@ -172,7 +172,7 @@ impl AppState {
                 if cur_state_bad {
                     *state_ref.write().unwrap() = MediaOpenState::default();
                 }
-                thread::yield_now();
+                crate::yield_thread();
                 continue;
             }
             let new_transfer = player_events.iter().find(|evt| {
@@ -272,7 +272,7 @@ impl AppState {
                     .unwrap();
             }
             prev_time = cur_time;
-            std::thread::yield_now();
+            crate::yield_thread();
         })?;
         self.local_event_thread = Some(handle);
         self.local_event_recv = Some(event_sink);
@@ -418,9 +418,9 @@ impl AppState {
             .as_ref()
             .and_then(|recv| match recv.try_recv() {
                 Ok(evt) => Some(evt),
-                Err(sync::mpsc::TryRecvError::Empty) => None,
-                Err(sync::mpsc::TryRecvError::Disconnected) => {
-                    MyResult::Err(sync::mpsc::TryRecvError::Disconnected.into()).unwrap()
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => {
+                    MyResult::Err(TryRecvError::Disconnected.into()).unwrap()
                 }
             })
     }
