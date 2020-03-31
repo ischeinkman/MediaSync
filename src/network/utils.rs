@@ -1,20 +1,20 @@
-use crate::MyResult;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, UdpSocket};
+use super::super::DynResult;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
+use tokio::net::{TcpListener, UdpSocket};
 
-pub fn random_listener(min_port: u16, max_port: u16) -> MyResult<TcpListener> {
-    let ip = local_network_ip()?;
+pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<TcpListener> {
+    let ip = local_network_ip().await?;
     let port = random_port(min_port, max_port);
 
     let addr = SocketAddr::from((ip, port));
-    let listener = TcpListener::bind(addr)?;
-    listener.set_nonblocking(true)?;
+    let listener = TcpListener::bind(addr).await?;
     Ok(listener)
 }
 
-fn local_network_ip() -> MyResult<IpAddr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000))?;
-    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000))?;
+async fn local_network_ip() -> DynResult<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000)).await?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000)).await?;
     let got_addr = socket.local_addr()?;
     Ok(got_addr.ip())
 }
@@ -72,15 +72,16 @@ pub struct IgdMapping {
 }
 
 impl IgdMapping {
-    pub fn request_any(
+    pub async fn request_any(
         local_addr: SocketAddrV4,
         args: IgdArgs,
         description: &str,
-    ) -> MyResult<IgdMapping> {
-        let gateway = igd::search_gateway(args.clone().search_args)?;
+    ) -> DynResult<IgdMapping> {
+        let gateway = igd::aio::search_gateway(args.clone().search_args).await?;
         let lease_duration = args.lease_duration.as_secs() as u32;
-        let public_addr =
-            gateway.get_any_address(args.protocol, local_addr, lease_duration, description)?;
+        let public_addr = gateway
+            .get_any_address(args.protocol, local_addr, lease_duration, description)
+            .await?;
         Ok(IgdMapping {
             local_addr: local_addr.into(),
             public_addr: public_addr.into(),
@@ -88,21 +89,24 @@ impl IgdMapping {
         })
     }
 
-    fn close_inner(&mut self) -> MyResult<()> {
-        let gateway = igd::search_gateway(igd::SearchOptions {
+    async fn close_inner(&mut self) -> DynResult<()> {
+        let gateway = igd::aio::search_gateway(igd::SearchOptions {
             ..self.args.search_args
-        })?;
-        match gateway.remove_port(self.args.protocol, self.public_addr.port()) {
+        })
+        .await?;
+        match gateway
+            .remove_port(self.args.protocol, self.public_addr.port())
+            .await
+        {
             Ok(()) => Ok(()),
             Err(igd::RemovePortError::NoSuchPortMapping) => Ok(()),
             Err(e) => Err(e.into()),
         }
     }
 }
-
 impl Drop for IgdMapping {
     fn drop(&mut self) {
-        self.close_inner().unwrap();
+        futures::executor::block_on(self.close_inner()).unwrap();
     }
 }
 
@@ -119,7 +123,7 @@ impl From<IgdMapping> for PublicAddr {
 }
 
 impl PublicAddr {
-    pub fn request_public(local_addr: SocketAddr) -> MyResult<PublicAddr> {
+    pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
         match local_addr {
             SocketAddr::V4(addr) => {
                 let ip = addr.ip();
@@ -130,7 +134,8 @@ impl PublicAddr {
                         addr,
                         IgdArgs::default(),
                         &format!("IlSync Mapping for local ip {}:{}", ip, addr.port()),
-                    )?;
+                    )
+                    .await?;
                     Ok(PublicAddr::Igd(mapped))
                 } else {
                     Ok(PublicAddr::Raw(local_addr))

@@ -1,33 +1,21 @@
-mod debug;
-pub mod events;
-mod mprisplayer;
+mod mpris_player;
+use super::DynResult;
 
-use crate::traits::{MediaPlayer, MediaPlayerList};
-use crate::MyResult;
-use std::collections::HashMap;
+use super::traits::sync::{SyncPlayer, SyncPlayerList};
 
-pub fn all_player_lists() -> MyResult<HashMap<String, Vec<String>>> {
-    let mut retvl = HashMap::new();
-    let mut mpris_player_list = mprisplayer::MprisPlayerList::new();
-    let mpris_players = mpris_player_list.available()?;
-    retvl.insert(mpris_player_list.list_name().to_owned(), mpris_players);
-    let mut debug_player_list = debug::DebugPlayerList::new();
-    let debug_players = debug_player_list.available()?;
-    retvl.insert(debug_player_list.list_name().to_owned(), debug_players);
-
-    Ok(retvl)
+pub struct BulkSyncPlayerList {
+    mpris: mpris_player::MprisPlayerList,
 }
 
-pub fn select_player(list: &str, player: &str) -> MyResult<Box<dyn MediaPlayer>> {
-    let mut mpris_list = mprisplayer::MprisPlayerList::new();
-    let mut debug_list = debug::DebugPlayerList::new();
-    if list == mpris_list.list_name() {
-        let player = mpris_list.open(player)?;
-        Ok(Box::new(player))
-    } else if list == debug_list.list_name() {
-        let player = debug_list.open(player)?;
-        Ok(Box::new(player))
-    } else {
-        Err(format!("Error: got invalid player identifier {}/{}", list, player).into())
+impl SyncPlayerList for BulkSyncPlayerList {
+    fn new() -> DynResult<Self> {
+        let mpris = mpris_player::MprisPlayerList::new()?;
+        Ok(Self { mpris })
+    }
+    fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer > )>> {
+        let mut retvl = Vec::new();
+        let mut mpris_players = self.mpris.get_players()?;
+        retvl.append(&mut mpris_players);
+        Ok(retvl)
     }
 }

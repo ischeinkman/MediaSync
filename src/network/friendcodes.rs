@@ -1,4 +1,3 @@
-use crate::MyResult;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
 fn decode_ipv4(digits: [char; 6]) -> u32 {
@@ -190,27 +189,33 @@ pub struct FriendCode {
     addr: SocketAddr,
 }
 
+pub enum FriendCodeError {
+    InvalidLength(usize),
+}
+
 impl FriendCode {
-    pub fn from_code(code: impl AsRef<str>) -> MyResult<Self> {
+    pub fn from_code(code: impl AsRef<str>) -> Result<Self, FriendCodeError> {
         let code = code.as_ref();
-        match code.len() {
-            25 => {
+        if code.len() == 25 {
                 let mut buffer = ['\0'; 25];
                 let code_chars = code.chars();
                 for (out, byte) in buffer.iter_mut().zip(code_chars) {
                     *out = byte;
                 }
                 Ok(FriendCode::from_code_v6(buffer))
-            }
-            9 => {
+
+        }
+        else if code.len() == 9 {
                 let mut buffer = ['\0'; 9];
                 let code_chars = code.chars();
                 for (out, byte) in buffer.iter_mut().zip(code_chars) {
                     *out = byte;
                 }
                 Ok(FriendCode::from_code_v4(buffer))
-            }
-            bad => Err(format!("Cannot parse friend code from invalid length {}", bad).into()),
+
+        }
+        else {
+            Err(FriendCodeError::InvalidLength(code.len()))
         }
     }
     pub fn from_code_v4(code: [char; 9]) -> Self {
