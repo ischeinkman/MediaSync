@@ -11,12 +11,7 @@ igd = {version = "0.10.0", features = ["aio"]}
 rand = "0.7"
 mpris = "2.0.0-rc2"
 clap = "2.33"
-crossbeam = "0.7"
-url = "2.1"
-tokio = {version = "0.2.11", features = ["full"]}
+tokio = {version = "0.2.11", features = ["net", "sync", "io-util", "time", "rt-core", "rt-util", "stream"]}
 futures = "0.3"
-
-[profile.release]
-debug=true
 
 [features]
