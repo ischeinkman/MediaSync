@@ -133,13 +133,7 @@ pub mod sync {
                         eprintln!("         : ERR: {} ({}) VS {}", current_pos.abs_sub(expected_pos).as_millis(), player_pos.abs_sub(expected_pos).as_millis(), self.config.pos_err_threshold.as_millis());
                         eprintln!("  Now attempting to rectify.");
                         if expected_pos < current_pos {
-                            let npos = expected_pos + TimeDelta::from_millis(self.config.pos_err_threshold.as_millis()/4);
-                            self.player.set_pos(npos)?;
-                            next_state.set_position(npos);
-                            next_state.set_created(TimeStamp::now());
-                        }
-                        else {
-                            let npos = player_pos - TimeDelta::from_millis(self.config.pos_err_threshold.as_millis()/4);
+                            let npos = expected_pos + TimeDelta::from_millis(self.config.pos_err_threshold.as_millis()/3);
                             self.player.set_pos(npos)?;
                             next_state.set_position(npos);
                             next_state.set_created(TimeStamp::now());
