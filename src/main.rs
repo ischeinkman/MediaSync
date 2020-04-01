@@ -124,7 +124,7 @@ pub async fn main() -> DynResult<()> {
     let _remote_stream_handle = task_set.spawn_local(remote_stream);
 
     let local_stream = {
-        let push_frequency_millis = 300;
+        let push_frequency_millis = 100;
         let prev_instant = Instant::now();
         let now = TimeStamp::now();
         let next_instant = Instant::now();
