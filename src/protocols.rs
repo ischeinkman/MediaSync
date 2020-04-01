@@ -3,6 +3,7 @@ use std::time::SystemTime;
 pub mod sync;
 use std::ops::Add;
 pub use sync::{PlayerPosition, PlayerState, SyncMessage};
+use crate::utils::AbsSub;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
 pub struct TimeStamp {
@@ -50,6 +51,13 @@ impl Add<TimeDelta> for TimeStamp {
         }
     }
 }
+
+impl AbsSub for TimeStamp {
+    type Output = TimeDelta;
+    fn abs_sub(self, other : Self) -> TimeDelta {
+        TimeDelta::from_millis(self.millis.abs_sub(other.millis))
+    }
+}
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
 pub struct TimeDelta {
     millis: u64,
@@ -61,6 +69,13 @@ impl TimeDelta {
     }
     pub fn as_millis(self) -> u64 {
         self.millis
+    }
+}
+
+impl AbsSub for TimeDelta {
+    type Output = Self;
+    fn abs_sub(self, other: Self) -> Self::Output {
+        TimeDelta::from_millis(self.millis.abs_sub(other.millis))
     }
 }
 

@@ -115,9 +115,12 @@ impl SyncMessage {
         copied.set_created(new_time);
         if self.state() == PlayerState::Playing {
             let old_pos = self.position();
-            let time_diff = new_time.millis.saturating_sub(self.created().millis);
-            let new_pos = PlayerPosition {
-                millis: old_pos.millis.saturating_add(time_diff),
+
+            let time_diff = new_time.abs_sub(self.created());
+            let new_pos = if new_time > self.created() {
+                old_pos + time_diff
+            } else {
+                old_pos - time_diff
             };
             copied.set_position(new_pos);
         }
@@ -162,6 +165,12 @@ impl std::ops::Add<TimeDelta> for PlayerPosition {
     }
 }
 
+impl std::ops::Sub<TimeDelta> for PlayerPosition {
+    type Output = Self;
+    fn sub(self, other: TimeDelta) -> Self {
+        PlayerPosition::from_millis(self.millis - other.as_millis())
+    }
+}
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum PlayerState {
     Playing,

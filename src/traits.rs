@@ -21,7 +21,7 @@ pub mod sync {
         fn default() -> Self {
             let id_bytes: [u8; 16] = rand::random();
             let id = UserId::from_bytes(&id_bytes);
-            let pos_err_threshold = TimeDelta::from_millis(300);
+            let pos_err_threshold = TimeDelta::from_millis(400);
             let jump_threshold = TimeDelta::from_millis(3000);
             let jump_if_backwards = false;
             Self {
@@ -77,11 +77,15 @@ pub mod sync {
 
             let mut next_state = self.previous_status;
 
-            let current_state = self.player.get_state()?;
+            let current_state = self.previous_status.state();
             if current_state != message.state() {
                 if message.changed_state() {
+                    println!("Got a state change! Now changing state to {:?}.", message.state());
                     self.player.set_state(message.state())?;
                     next_state.set_state(message.state());
+                    next_state.set_created(TimeStamp::now());
+                } else if current_state != self.previous_status.state() {
+                    eprintln!("  WARNING: Player changed state mid push.");
                 } else {
                     eprintln!("  WARNING: Got a state desync with another player. We are {:?}, but they are {:?}.", current_state, message.state());
                     eprintln!(
@@ -91,30 +95,55 @@ pub mod sync {
                     if current_state != PlayerState::Paused {
                         self.player.set_state(PlayerState::Paused)?;
                         next_state.set_state(PlayerState::Paused);
+                        next_state.set_created(TimeStamp::now());
                     }
                 }
             }
 
             let current_time = TimeStamp::now();
-            let current_pos = self.player.get_pos()?;
+            let current_pos = self
+                .previous_status
+                .projected_to_time(current_time)
+                .position();
 
             let expected_pos = message.projected_to_time(current_time).position();
             if current_pos.abs_sub(expected_pos) > self.config.pos_err_threshold {
                 if message.jumped() {
-                    let npos = expected_pos
-                        + TimeDelta::from_millis(self.config.pos_err_threshold.as_millis() / 4);
+                    println!("Got a remote jump! Now jumping to {}.", expected_pos.as_millis());
+                    let npos = expected_pos;
                     self.player.set_pos(npos)?;
                     next_state.set_position(npos);
                     next_state.set_created(TimeStamp::now());
                 } else {
-                    eprintln!("  WARNING: Got a position desync with another player. We are at {}, but they are at {}.", current_pos.as_millis(), expected_pos.as_millis());
-                    eprintln!("  Rectifying to earlier.");
-                    if expected_pos < current_pos {
-                        let npos = expected_pos
-                            + TimeDelta::from_millis(self.config.pos_err_threshold.as_millis() / 4);
-                        self.player.set_pos(npos)?;
-                        next_state.set_position(npos);
+                    let player_pos = self.player.get_pos()?;
+                    let different_mag = player_pos.abs_sub(current_pos);
+                    if different_mag > self.config.jump_threshold
+                        || (player_pos < current_pos && self.config.jump_if_backwards)
+                    {
+                        eprintln!("  WARNING: Player jumped mid push.");
+                    } 
+                    else if player_pos.abs_sub(expected_pos) <= self.config.pos_err_threshold {
+                        eprintln!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
+                        eprintln!("  Not rectifying since it seems our actual position is okay?");
+                        next_state.set_position(player_pos);
                         next_state.set_created(TimeStamp::now());
+                    }
+                    else {
+                        eprintln!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
+                        eprintln!("         : ERR: {} ({}) VS {}", current_pos.abs_sub(expected_pos).as_millis(), player_pos.abs_sub(expected_pos).as_millis(), self.config.pos_err_threshold.as_millis());
+                        eprintln!("  Now attempting to rectify.");
+                        if expected_pos < current_pos {
+                            let npos = expected_pos + TimeDelta::from_millis(self.config.pos_err_threshold.as_millis()/4);
+                            self.player.set_pos(npos)?;
+                            next_state.set_position(npos);
+                            next_state.set_created(TimeStamp::now());
+                        }
+                        else {
+                            let npos = player_pos - TimeDelta::from_millis(self.config.pos_err_threshold.as_millis()/4);
+                            self.player.set_pos(npos)?;
+                            next_state.set_position(npos);
+                            next_state.set_created(TimeStamp::now());
+                        }
                     }
                 }
             }
