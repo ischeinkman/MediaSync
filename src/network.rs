@@ -146,6 +146,10 @@ impl NetworkManager {
                         eprintln!("  WARNING: Connection was reset.");
                         Ok(None)
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                        eprintln!("  WARNING: Connection pipe was broken.");
+                        Ok(None)
+                    }
                     e => {
                         e.unwrap();
                         unimplemented!()
