@@ -1,4 +1,4 @@
-use super::super::DynResult;
+use crate::DynResult;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};

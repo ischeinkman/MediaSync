@@ -116,9 +116,9 @@ impl Message {
     pub fn parse_block(block: [u8; 32]) -> DynResult<Message> {
         match get_proto(&block) {
             Ok(MessageProto::Sync) => Ok(Message::Sync(SyncMessage::from_raw(block))),
-            Ok(MessageProto::Media) => {
-                Err(format!("Error: Media protocol is not yet implemented").into())
-            }
+            Ok(MessageProto::Media) => Err("Error: Media protocol is not yet implemented"
+                .to_owned()
+                .into()),
             Err(tag) => Err(format!("Error: found invalid protocol tag {}", tag).into()),
         }
     }
@@ -131,7 +131,7 @@ impl Message {
 }
 
 impl From<SyncMessage> for Message {
-    fn from(body : SyncMessage) -> Self {
+    fn from(body: SyncMessage) -> Self {
         Message::Sync(body)
     }
 }

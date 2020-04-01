@@ -1,5 +1,5 @@
-use super::super::utils::{array_copy, AbsSub};
 use super::{MessageProto, TimeDelta, TimeStamp, UserId};
+use crate::utils::{array_copy, AbsSub};
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct SyncMessage {
     // All numbers are stored in LITTLE ENDIAN.
@@ -157,7 +157,7 @@ impl AbsSub for PlayerPosition {
 
 impl std::ops::Add<TimeDelta> for PlayerPosition {
     type Output = Self;
-    fn add(self, other : TimeDelta) -> Self {
+    fn add(self, other: TimeDelta) -> Self {
         PlayerPosition::from_millis(self.millis + other.as_millis())
     }
 }
@@ -167,7 +167,6 @@ pub enum PlayerState {
     Playing,
     Paused,
 }
-
 
 #[cfg(test)]
 mod tests {

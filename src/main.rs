@@ -1,9 +1,5 @@
 mod protocols;
 
-pub type MyError = Box<dyn std::error::Error>;
-
-type DynResult<T> = Result<T, MyError>;
-
 mod utils;
 
 mod players;
@@ -11,33 +7,46 @@ mod players;
 mod network;
 
 mod traits;
-use traits::sync::{SyncOps, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
+use network::{
+    friendcodes::{FriendCode, FriendCodeError},
+    NetworkManager,
+};
+use players::BulkSyncPlayerList;
+use protocols::{Message, TimeStamp};
+use traits::sync::{SyncConfig, SyncOps, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
 
 use clap::{App, Arg};
 
-use futures::future::{AbortHandle, AbortRegistration, Abortable, Aborted, FutureExt};
+use futures::future::FutureExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
 
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::task::LocalSet;
+use tokio::time::{Duration, Instant};
 
-#[allow(unused)]
-pub async fn new_main() -> DynResult<()> {
+pub type MyError = Box<dyn std::error::Error>;
+
+type DynResult<T> = Result<T, MyError>;
+
+#[tokio::main]
+pub async fn main() -> DynResult<()> {
     let arg_parser = init_parser();
     let args = arg_parser.get_matches();
 
     println!("Welcome to Ilan's MediaSync!");
     println!("Now starting communication thread...");
     let listener = network::utils::random_listener(10000, 30000).await?;
-    let mut network_manager = network::NetworkManager::new(listener)?;
+    let mut network_manager = NetworkManager::new(listener)?;
     println!("Communication thread started!");
     println!(
         "Local network friend code: {}",
-        network::friendcodes::FriendCode::from_addr(network_manager.local_addr()).as_friend_code()
+        FriendCode::from_addr(network_manager.local_addr()).as_friend_code()
     );
     println!("Now searching for available players...");
-    let mut player_finder = players::BulkSyncPlayerList::new()?;
+    let mut player_finder = BulkSyncPlayerList::new()?;
     let mut player_list = player_finder.get_players()?;
     if player_list.is_empty() {
         println!("Found no players. Exiting.");
@@ -57,15 +66,15 @@ pub async fn new_main() -> DynResult<()> {
 
     let cons = args.values_of("connections").into_iter().flatten();
     for code in cons {
-        let addr = match network::friendcodes::FriendCode::from_code(code) {
+        let addr = match FriendCode::from_code(code) {
             Ok(a) => a,
-            Err(network::friendcodes::FriendCodeError::InvalidLength(l)) => {
+            Err(FriendCodeError::InvalidLength(l)) => {
                 eprintln!("ERROR: {} is not a valid friend code.", code);
                 eprintln!("       Friend codes  can only be 9 (for IPv4) or 25 (for IPv6) characters long, but this code is length {}.", l);
                 return Err("".into());
             }
         };
-        let stream = tokio::net::TcpStream::connect(addr.as_addr()).await?;
+        let stream = TcpStream::connect(addr.as_addr()).await?;
         network_manager.add_connection(stream).await?;
     }
     if args.is_present("public") {
@@ -73,14 +82,13 @@ pub async fn new_main() -> DynResult<()> {
         network_manager.request_public().await?;
         println!(
             "Success! Public code: {}",
-            network::friendcodes::FriendCode::from_addr(network_manager.public_addr().unwrap())
-                .as_friend_code()
+            FriendCode::from_addr(network_manager.public_addr().unwrap()).as_friend_code()
         );
     }
     let network_manager = Arc::new(network_manager);
     let player = Arc::new(Mutex::new(player));
 
-    let task_set = tokio::task::LocalSet::new();
+    let task_set = LocalSet::new();
     let remote_stream = {
         let player_ref = Arc::clone(&player);
         let network_ref = Arc::clone(&network_manager);
@@ -92,7 +100,7 @@ pub async fn new_main() -> DynResult<()> {
                 async move {
                     let mut player_lock = player_ref.lock().await;
                     let outpt = match evt {
-                        protocols::Message::Sync(msg) => player_lock.push_sync_status(msg),
+                        Message::Sync(msg) => player_lock.push_sync_status(msg),
                     };
                     match outpt {
                         Ok(true) => {
@@ -113,22 +121,21 @@ pub async fn new_main() -> DynResult<()> {
             })
     };
 
-    let remote_stream_handle = task_set.spawn_local(remote_stream);
+    let _remote_stream_handle = task_set.spawn_local(remote_stream);
 
     let local_stream = {
         let push_frequency_millis = 300;
-        let prev_instant = tokio::time::Instant::now();
-        let now = protocols::TimeStamp::now();
-        let next_instant = tokio::time::Instant::now();
+        let prev_instant = Instant::now();
+        let now = TimeStamp::now();
+        let next_instant = Instant::now();
 
         let offset_millis = now.as_millis() % push_frequency_millis;
         let delay_millis = 2 * push_frequency_millis - offset_millis;
 
         let avg_instant = prev_instant + (next_instant - prev_instant) / 2;
-        let start_time = avg_instant + tokio::time::Duration::from_millis(delay_millis);
+        let start_time = avg_instant + Duration::from_millis(delay_millis);
 
-        let time_stream =
-            tokio::time::interval_at(start_time, tokio::time::Duration::from_millis(delay_millis));
+        let time_stream = tokio::time::interval_at(start_time, Duration::from_millis(delay_millis));
 
         let player_ref = Arc::clone(&player);
         let network_ref = Arc::clone(&network_manager);
@@ -158,14 +165,20 @@ pub async fn new_main() -> DynResult<()> {
                 res.unwrap();
             })
     };
-    let local_stream_handle = task_set.spawn_local(local_stream);
+    let _local_stream_handle = task_set.spawn_local(local_stream);
 
-    let connection_updator = network_manager.new_connections().for_each(|res| async move {
-        let naddr = res.unwrap();
-        let code = network::friendcodes::FriendCode::from_addr(naddr);
-        println!("Got a new connection from {:?} ({})", code.as_friend_code(), naddr);
-    });
-    let connection_updator_handle = task_set.spawn_local(connection_updator);
+    let connection_updator = network_manager
+        .new_connections()
+        .for_each(|res| async move {
+            let naddr = res.unwrap();
+            let code = FriendCode::from_addr(naddr);
+            println!(
+                "Got a new connection from {:?} ({})",
+                code.as_friend_code(),
+                naddr
+            );
+        });
+    let _connection_updator_handle = task_set.spawn_local(connection_updator);
 
     task_set.await;
     Ok(())
@@ -227,7 +240,7 @@ fn simpleui_select_player<'a>(
                 None
             }
         });
-        let config = Default::default();
+        let config = SyncConfig::new();
         match parse_res {
             Ok(Some((name, player))) => {
                 break (name, SyncPlayerWrapper::new(player, config).unwrap());

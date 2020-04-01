@@ -1,7 +1,8 @@
-use super::protocols;
 pub mod friendcodes;
 pub mod utils;
 
+use crate::protocols::Message;
+use crate::DynResult;
 use utils::PublicAddr;
 
 use futures::FutureExt as FutureFutureExt;
@@ -15,7 +16,7 @@ use tokio::stream::{Stream, StreamMap};
 use tokio::sync::broadcast;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
-type EventStream = futures::stream::BoxStream<'static, super::DynResult<protocols::Message>>;
+type EventStream = futures::stream::BoxStream<'static, DynResult<Message>>;
 type EventStreamStore = Arc<Mutex<StreamMap<SocketAddr, EventStream>>>;
 
 pub struct EventSink {
@@ -35,7 +36,7 @@ impl From<EventSink> for WriteHalf<TcpStream> {
 }
 
 impl EventSink {
-    pub async fn write_message(&mut self, msg: protocols::Message) -> Result<(), std::io::Error> {
+    pub async fn write_message(&mut self, msg: Message) -> Result<(), std::io::Error> {
         let buff = msg.into_block();
         self.inner.write_all(&buff).await?;
         Ok(())
@@ -53,7 +54,7 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
-    pub fn new(listener: TcpListener) -> super::DynResult<Self> {
+    pub fn new(listener: TcpListener) -> DynResult<Self> {
         let local_addr = listener.local_addr().unwrap();
         let public_addr = None;
         let (address_sink, _) = broadcast::channel(5);
@@ -74,7 +75,7 @@ impl NetworkManager {
         })
     }
 
-    pub fn new_connections(&self) -> impl Stream<Item = super::DynResult<SocketAddr>> {
+    pub fn new_connections(&self) -> impl Stream<Item = DynResult<SocketAddr>> {
         self.connection_task
             .address_sink
             .subscribe()
@@ -89,7 +90,7 @@ impl NetworkManager {
         self.public_addr.as_ref().map(|p| p.addr())
     }
 
-    pub async fn request_public(&mut self) -> super::DynResult<()> {
+    pub async fn request_public(&mut self) -> DynResult<()> {
         if self.public_addr.is_some() {
             return Ok(());
         }
@@ -98,7 +99,7 @@ impl NetworkManager {
         Ok(())
     }
 
-    pub async fn add_connection(&self, con: TcpStream) -> super::DynResult<()> {
+    pub async fn add_connection(&self, con: TcpStream) -> DynResult<()> {
         let addr = con.local_addr()?;
         let (read, write) = tokio::io::split(con);
         let mut sources_lock = self.event_sources.lock().await;
@@ -109,7 +110,7 @@ impl NetworkManager {
         Ok(())
     }
 
-    pub fn remote_event_stream(&self) -> impl Stream<Item = super::DynResult<protocols::Message>> {
+    pub fn remote_event_stream(&self) -> impl Stream<Item = DynResult<Message>> {
         let sources = Arc::clone(&self.event_sources);
         futures::stream::unfold(sources, |srcref| async move {
             let nxt = loop {
@@ -128,16 +129,14 @@ impl NetworkManager {
                     tokio::task::yield_now().await;
                     Some(retvl)
                 }
-                None => {
-                    Some((Err(format!("No streams in sources!").into()), srcref))
-                }
+                None => Some((Err("No streams in sources!".to_owned().into()), srcref)),
             }
         })
     }
 
-    pub async fn broadcast_event(&self, msg: protocols::Message) -> super::DynResult<()> {
+    pub async fn broadcast_event(&self, msg: Message) -> DynResult<()> {
         let mut sink_lock = self.event_sinks.lock().await;
-        let sink_iter = futures::stream::iter(sink_lock.drain(..)).map(super::DynResult::Ok);
+        let sink_iter = futures::stream::iter(sink_lock.drain(..)).map(DynResult::Ok);
         let new_sink_res: Result<Vec<_>, _> = sink_iter
             .try_filter_map(|mut writer| async move {
                 let res = writer.write_message(msg).await;
@@ -198,10 +197,7 @@ impl BackgroundTask {
                         break;
                     }
                 };
-                let addr = match con.peer_addr() {
-                    Ok(c) => c,
-                    Err(_e) => unimplemented!(),
-                };
+                let addr = con.peer_addr().unwrap();
                 let (read, write) = tokio::io::split(con);
                 let mut sources_lock = event_sources.lock().await;
                 let mut sinks_lock = event_sinks.lock().await;
@@ -239,7 +235,7 @@ pub fn make_event_stream(reader: ReadHalf<TcpStream>) -> EventStream {
         let res = rdr.read_exact(&mut buff).await;
         let retvl = res
             .map_err(|e| e.into())
-            .and_then(|_| protocols::Message::parse_block(buff))
+            .and_then(|_| Message::parse_block(buff))
             .unwrap();
         Some((Ok(retvl), rdr))
     })

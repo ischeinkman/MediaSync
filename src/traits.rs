@@ -1,8 +1,8 @@
 pub mod sync {
-    use super::super::protocols::sync::{PlayerPosition, PlayerState, SyncMessage};
-    use super::super::protocols::{TimeDelta, TimeStamp, UserId};
-    use super::super::utils::AbsSub;
-    use super::super::DynResult;
+    use crate::protocols::sync::{PlayerPosition, PlayerState, SyncMessage};
+    use crate::protocols::{TimeDelta, TimeStamp, UserId};
+    use crate::utils::AbsSub;
+    use crate::DynResult;
     #[derive(Clone, Eq, PartialEq, Debug)]
     pub struct SyncConfig {
         pub id: UserId,
@@ -74,7 +74,6 @@ pub mod sync {
             if has_newer {
                 return Ok(false);
             }
-
 
             let mut next_state = self.previous_status;
 

@@ -197,24 +197,20 @@ impl FriendCode {
     pub fn from_code(code: impl AsRef<str>) -> Result<Self, FriendCodeError> {
         let code = code.as_ref();
         if code.len() == 25 {
-                let mut buffer = ['\0'; 25];
-                let code_chars = code.chars();
-                for (out, byte) in buffer.iter_mut().zip(code_chars) {
-                    *out = byte;
-                }
-                Ok(FriendCode::from_code_v6(buffer))
-
-        }
-        else if code.len() == 9 {
-                let mut buffer = ['\0'; 9];
-                let code_chars = code.chars();
-                for (out, byte) in buffer.iter_mut().zip(code_chars) {
-                    *out = byte;
-                }
-                Ok(FriendCode::from_code_v4(buffer))
-
-        }
-        else {
+            let mut buffer = ['\0'; 25];
+            let code_chars = code.chars();
+            for (out, byte) in buffer.iter_mut().zip(code_chars) {
+                *out = byte;
+            }
+            Ok(FriendCode::from_code_v6(buffer))
+        } else if code.len() == 9 {
+            let mut buffer = ['\0'; 9];
+            let code_chars = code.chars();
+            for (out, byte) in buffer.iter_mut().zip(code_chars) {
+                *out = byte;
+            }
+            Ok(FriendCode::from_code_v4(buffer))
+        } else {
             Err(FriendCodeError::InvalidLength(code.len()))
         }
     }

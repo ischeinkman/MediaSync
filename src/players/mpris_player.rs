@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use super::super::protocols::{PlayerPosition, PlayerState};
-use super::super::traits::sync::{SyncPlayer, SyncPlayerList};
-use super::super::DynResult;
+use crate::protocols::{PlayerPosition, PlayerState};
+use crate::traits::sync::{SyncPlayer, SyncPlayerList};
+use crate::DynResult;
 
 pub struct MprisPlayer<'a> {
     player: mpris::Player<'a>,
@@ -49,7 +49,7 @@ impl<'a> SyncPlayer for MprisPlayer<'a> {
             .get_metadata()
             .map_err(wrap_dbus_error)?
             .track_id()
-            .ok_or_else(|| format!("Error: nothing is currently playing!"))?;
+            .ok_or_else(|| "Error: nothing is currently playing!".to_owned())?;
         self.player
             .set_position(track_id, &Duration::from_millis(state.as_millis()))
             .map_err(wrap_dbus_error)?;
