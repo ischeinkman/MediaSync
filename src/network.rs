@@ -239,9 +239,8 @@ pub fn make_event_stream(reader: ReadHalf<TcpStream>) -> EventStream {
         let res = rdr.read_exact(&mut buff).await;
         let retvl = res
             .map_err(|e| e.into())
-            .and_then(|_| Message::parse_block(buff))
-            .unwrap();
-        Some((Ok(retvl), rdr))
+            .and_then(|_| Message::parse_block(buff));
+        Some((retvl, rdr))
     })
     .boxed()
 }
