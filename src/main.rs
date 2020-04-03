@@ -114,10 +114,23 @@ pub async fn main() -> DynResult<()> {
                 }
             })
             .map(|res| {
-                if res.is_err() {
-                    eprintln!("Got error in remote_stream. Now dying.");
+                if let Err(e) = res {
+                    if let Some(e) = e.downcast_ref::<std::io::Error>() {
+                        match e.kind() {
+                            std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::UnexpectedEof => {}
+                            _ => {
+                                Result::<(), _>::Err(e).unwrap();
+                            }
+                        }
+                    } else {
+                        Err(e).unwrap()
+                    }
+                } else {
+                    res.unwrap()
                 }
-                res.unwrap()
             })
     };
 

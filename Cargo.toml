@@ -11,7 +11,7 @@ igd = {version = "0.10.0", features = ["aio"]}
 rand = "0.7"
 mpris = "2.0.0-rc2"
 clap = "2.33"
-tokio = {version = "0.2.11", features = ["net", "sync", "io-util", "time", "rt-core", "rt-util", "stream"]}
+tokio = {version = "0.2.15", features = ["net", "sync", "io-util", "time", "rt-core", "rt-util", "stream", "process"]}
 futures = "0.3"
 
 [features]
