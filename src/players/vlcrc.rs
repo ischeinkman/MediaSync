@@ -110,7 +110,7 @@ impl SyncPlayer for VlcRcPlayer {
         }
     }
     fn get_state(&self) -> DynResult<PlayerState> {
-        let raw_state = dbg!(self.run_command("status")).unwrap();
+        let raw_state = self.run_command("status").unwrap();
         let trimmed_state = raw_state.trim();
         if trimmed_state.contains("playing") {
             Ok(PlayerState::Playing)
