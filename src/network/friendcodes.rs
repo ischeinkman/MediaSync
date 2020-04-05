@@ -188,7 +188,7 @@ fn decode_socketaddrv6(code: [char; 25]) -> SocketAddrV6 {
 pub struct FriendCode {
     addr: SocketAddr,
 }
-
+#[derive(Eq, PartialEq, Debug)]
 pub enum FriendCodeError {
     InvalidLength(usize),
 }
