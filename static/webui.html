@@ -1,0 +1,237 @@
+<html>
+
+<head>
+    <script>
+        var validate_friendcode = function (code = "") {
+            code = code.trim();
+            if (code.length != 9 && code.length != 25) {
+                return -1;
+            }
+            for (idx = 0; idx < code.length; idx++) {
+                var c = code.charCodeAt(idx);
+                var is_lower = 'a'.charCodeAt(0) <= c <= 'z'.charCodeAt(0);
+                var is_upper = 'A'.charCodeAt(0) <= c <= 'Z'.charCodeAt(0);
+                var is_num = '0'.charCodeAt(0) <= c <= '9'.charCodeAt(0);
+                if (!is_lower && !is_upper && !is_num) {
+                    return -2;
+                }
+            }
+            return 0;
+        };
+        var on_add_connection = function () {
+            var elm = document.getElementById('add_connection_code');
+            var inp = elm.value;
+            if (validate_friendcode(inp) != 0) {
+                //TODO: This. 
+                elm.style.outlineColor = "red";
+            }
+            else {
+                elm.style.outlineColor = "";
+                backend_interface.add_connection(inp);
+                elm.value = "";
+            }
+        }
+        var backend_interface = {
+            open_public: function () {
+                window.external.invoke(JSON.stringify({ cmd: 'open_public' }))
+            },
+            select_player: function (idx) {
+                window.external.invoke(JSON.stringify({ cmd: 'select_player', idx: idx }))
+            },
+            add_connection: function (friendcode) {
+                window.external.invoke(JSON.stringify({ cmd: 'add_connection', code: friendcode }))
+            }
+        };
+        var frontend_interface = {
+            set_connections: function (iplist) {
+                var inf = document.getElementById("remote_info_body");
+                inf.innerHTML = "";
+                for (con of iplist) {
+                    var newnode = document.createElement('div');
+                    newnode.classList.add("remote_info_element");
+                    newnode.innerHTML = 'Friend Code: ' + con.friend_code;
+                    inf.appendChild(newnode)
+                }
+            },
+            mylog: function (msg) {
+                var lognode = document.createElement("div");
+                lognode.classList.add("log_line");
+                lognode.innerText += msg;
+                document.getElementById('log_view').appendChild(lognode);
+            },
+            open_player_list: function (players) {
+                document.getElementById('main_view').style.display = 'none';
+                document.getElementById('player_list_view').style.display = '';
+                for (idx = 0; idx < players.length; idx++) {
+                    var name = players[idx].name;
+                    var newnode = document.createElement('div');
+                    newnode.classList.add("player_list_element");
+                    const nidx = idx;
+                    newnode.onclick = function () {
+                        backend_interface.select_player(nidx);
+                    };
+                    newnode.innerText = name;
+                    document.getElementById('player_list').appendChild(newnode);
+                }
+            },
+            close_player_list: function () {
+                document.getElementById('main_view').style.display = '';
+                document.getElementById('player_list_view').style.display = 'none';
+            },
+            set_local_con_info: function (localinfo) {
+                var elm = document.getElementById('local_con_info_body');
+                elm.innerText = 'Local friend code: ' + localinfo.local_code;
+                if (localinfo.public_code) {
+                    elm.innerHTML += '<br/>';
+                    elm.innerHTML += 'Public friend code: ' + localinfo.public_code
+                    document.getElementById('open_public_button').style.display = 'none';
+                }
+                else {
+                    document.getElementById('open_public_button').style.display = 'visible';
+                }
+            }
+        };
+    </script>
+    <style>
+        body {
+            margin: 0;
+            padding : 0;
+        }
+        #main_view {
+            display: flex;
+            flex-direction: row;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 100%;
+            overflow-y: scroll;
+            max-height: 80%;
+        }
+
+        #play_list_view {
+            width: 100%;
+            overflow-y: scroll;
+        }
+
+        .panel {
+            margin: 10px;
+            min-width: 300px;
+            padding: 5px;
+            height: fit-content;
+            display: flex;
+            flex-direction: column;
+            background-color: #DDD;
+            border-width: 1px;
+            border-style: solid;
+            border-radius: 10px;
+        }
+
+        #local_con_info {
+        }
+
+        #remote_info {
+        }
+
+        header {
+            width: 100%;
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .panel_body {
+            text-align: center;
+            align-items: center;
+            justify-items: center;
+            align-items: center;
+            justify-items: center;
+        }
+
+        #open_public_button {
+            background-color: blue;
+            border-radius: 5px;
+            padding: 5px;
+            margin-top: 5px;
+            margin-bottom: 5px;
+            width: fit-content;
+            align-self: center;
+        }
+
+        #add_connection_wrapper {
+            display: flex;
+            flex-direction: row;
+            padding: 10px;
+
+        }
+
+        #add_connection_code {
+            flex-grow: 1;
+            flex-shrink: 1;
+            margin: 5px;
+        }
+
+        #add_connection_button {
+            margin: 5px;
+        }
+
+        #log_panel {
+            min-height: 20px;
+            max-height: 20%;
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            min-width: 0px;
+            margin : 0px;
+            padding : 0px;
+        }
+        #log_view {
+            display: flex;
+            flex-direction: column;
+            overflow-y: scroll;
+        }
+        .log_line {
+            min-height: 20px;
+            background-color: white;
+            font-weight: bold;
+            margin-top: 5px;
+            margin-bottom: 5px;
+            justify-self: start;
+        }
+    </style>
+</head>
+
+<body>
+    <div id='player_list_view'>
+        <section id = "player_list_panel" class="panel">
+            <header>Player List</header>
+            <div id="player_list" class="panel_body">
+
+            </div>
+        </section>
+    </div>
+    <div id="main_view">
+        <section id="local_con_info" class="panel">
+            <header>Local Information</header>
+            <div id="local_con_info_body" class="panel_body"></div>
+            <div id="open_public_button" class="panel_body" onclick="backend_interface.open_public();">Open
+                Public</div>
+        </section>
+        <section id="remote_info" class="panel">
+            <header>Remote Connections</header>
+            <div id="remote_info_body" class="panel_body"></div>
+            <div id="add_connection_wrapper" class="panel_body">
+                <input id="add_connection_code" type="text">
+                <div id="add_connection_button" onclick="on_add_connection();">
+                    +
+                </div>
+            </div>
+        </section>
+    </div>
+    <section id="log_panel" class="panel">
+        <header>Log</header>
+        <div id="log_view" class="panel_body">
+
+        </div>
+    </section>
+</body>
+
+</html>

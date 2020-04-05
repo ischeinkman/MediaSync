@@ -82,10 +82,10 @@ impl SyncPlayerList for MprisPlayerList {
     }
 }
 
-fn wrap_dbus_error(err: mpris::DBusError) -> Box<dyn std::error::Error> {
+fn wrap_dbus_error(err: mpris::DBusError) -> crate::MyError {
     format!("mpris::DebusError: {:?}", err).into()
 }
 
-fn wrap_finding_error(err: mpris::FindingError) -> Box<dyn std::error::Error> {
+fn wrap_finding_error(err: mpris::FindingError) -> crate::MyError {
     format!("mpris::FindingError: {:?}", err).into()
 }

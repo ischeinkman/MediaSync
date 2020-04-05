@@ -80,15 +80,15 @@ pub mod sync {
             let current_state = self.previous_status.state();
             if current_state != message.state() {
                 if message.changed_state() {
-                    println!("Got a state change! Now changing state to {:?}.", message.state());
+                    log::info!("Got a state change! Now changing state to {:?}.", message.state());
                     self.player.set_state(message.state())?;
                     next_state.set_state(message.state());
                     next_state.set_created(TimeStamp::now());
                 } else if current_state != self.previous_status.state() {
-                    eprintln!("  WARNING: Player changed state mid push.");
+                    log::warn!("  WARNING: Player changed state mid push.");
                 } else {
-                    eprintln!("  WARNING: Got a state desync with another player. We are {:?}, but they are {:?}.", current_state, message.state());
-                    eprintln!(
+                    log::warn!("  WARNING: Got a state desync with another player. We are {:?}, but they are {:?}.", current_state, message.state());
+                    log::warn!(
                         "  Defaulting to {:?} to best rectify the situation.",
                         PlayerState::Paused
                     );
@@ -109,7 +109,7 @@ pub mod sync {
             let expected_pos = message.projected_to_time(current_time).position();
             if current_pos.abs_sub(expected_pos) > self.config.pos_err_threshold {
                 if message.jumped() {
-                    println!("Got a remote jump! Now jumping to {}.", expected_pos.as_millis());
+                    log::info!("Got a remote jump! Now jumping to {}.", expected_pos.as_millis());
                     let npos = expected_pos;
                     self.player.set_pos(npos)?;
                     next_state.set_position(npos);
@@ -120,18 +120,18 @@ pub mod sync {
                     if different_mag > self.config.jump_threshold
                         || (player_pos < current_pos && self.config.jump_if_backwards)
                     {
-                        eprintln!("  WARNING: Player jumped mid push.");
+                        log::warn!("  WARNING: Player jumped mid push.");
                     } 
                     else if player_pos.abs_sub(expected_pos) <= self.config.pos_err_threshold {
-                        eprintln!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
-                        eprintln!("  Not rectifying since it seems our actual position is okay?");
+                        log::warn!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
+                        log::warn!("  Not rectifying since it seems our actual position is okay?");
                         next_state.set_position(player_pos);
                         next_state.set_created(TimeStamp::now());
                     }
                     else {
-                        eprintln!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
-                        eprintln!("         : ERR: {} ({}) VS {}", current_pos.abs_sub(expected_pos).as_millis(), player_pos.abs_sub(expected_pos).as_millis(), self.config.pos_err_threshold.as_millis());
-                        eprintln!("  Now attempting to rectify.");
+                        log::warn!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
+                        log::warn!("         : ERR: {} ({}) VS {}", current_pos.abs_sub(expected_pos).as_millis(), player_pos.abs_sub(expected_pos).as_millis(), self.config.pos_err_threshold.as_millis());
+                        log::warn!("  Now attempting to rectify.");
                         if expected_pos < current_pos {
                             let npos = expected_pos + TimeDelta::from_millis(self.config.pos_err_threshold.as_millis()/3);
                             self.player.set_pos(npos)?;

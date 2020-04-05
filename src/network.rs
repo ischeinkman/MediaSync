@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::{Stream, StreamMap};
 use tokio::sync::broadcast;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 type EventStream = futures::stream::BoxStream<'static, DynResult<Message>>;
 type EventStreamStore = Arc<Mutex<StreamMap<SocketAddr, EventStream>>>;
@@ -47,7 +47,7 @@ type EventSinkStore = Arc<Mutex<Vec<EventSink>>>;
 
 pub struct NetworkManager {
     local_addr: SocketAddr,
-    public_addr: Option<PublicAddr>,
+    public_addr: RwLock<Option<PublicAddr>>,
     event_sources: EventStreamStore,
     event_sinks: EventSinkStore,
     connection_task: BackgroundTask,
@@ -56,7 +56,7 @@ pub struct NetworkManager {
 impl NetworkManager {
     pub fn new(listener: TcpListener) -> DynResult<Self> {
         let local_addr = listener.local_addr().unwrap();
-        let public_addr = None;
+        let public_addr = RwLock::new(None);
         let (address_sink, _) = broadcast::channel(5);
         let event_sources = Arc::new(Mutex::new(StreamMap::new()));
         let event_sinks = Arc::new(Mutex::new(Vec::new()));
@@ -79,23 +79,24 @@ impl NetworkManager {
         self.connection_task
             .address_sink
             .subscribe()
-            .map_err(|e| e.into())
+            .map_err(Box::from)
     }
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    pub fn public_addr(&self) -> Option<SocketAddr> {
-        self.public_addr.as_ref().map(|p| p.addr())
+    pub async fn public_addr(&self) -> Option<SocketAddr> {
+        self.public_addr.read().await.as_ref().map(|p| p.addr())
     }
 
-    pub async fn request_public(&mut self) -> DynResult<()> {
-        if self.public_addr.is_some() {
+    pub async fn request_public(&self) -> DynResult<()> {
+        let mut public_addr_lock = self.public_addr.write().await;
+        if public_addr_lock.is_some() {
             return Ok(());
         }
         let new_public = PublicAddr::request_public(self.local_addr).await?;
-        self.public_addr = Some(new_public);
+        *public_addr_lock = Some(new_public);
         Ok(())
     }
 
@@ -143,11 +144,11 @@ impl NetworkManager {
                 match res {
                     Ok(()) => Ok(Some(writer)),
                     Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
-                        eprintln!("  WARNING: Connection was reset.");
+                        log::warn!("  WARNING: Connection was reset.");
                         Ok(None)
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                        eprintln!("  WARNING: Connection pipe was broken.");
+                        log::warn!("  WARNING: Connection pipe was broken.");
                         Ok(None)
                     }
                     e => {
@@ -202,6 +203,7 @@ impl BackgroundTask {
                     }
                 };
                 let addr = con.peer_addr().unwrap();
+                log::info!("New connection from addr: {:?}", addr);
                 let (read, write) = tokio::io::split(con);
                 let mut sources_lock = event_sources.lock().await;
                 let mut sinks_lock = event_sinks.lock().await;
