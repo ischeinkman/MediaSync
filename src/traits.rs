@@ -77,7 +77,7 @@ pub mod sync {
 
             let mut next_state = self.previous_status;
 
-            let current_state = self.previous_status.state();
+            let current_state = self.player.get_state().unwrap();
             if current_state != message.state() {
                 if message.changed_state() {
                     log::info!("Got a state change! Now changing state to {:?}.", message.state());
@@ -148,7 +148,7 @@ pub mod sync {
         }
         fn get_sync_status(&mut self) -> DynResult<SyncMessage> {
             let prev_status = self.previous_status;
-            let mut retvl = prev_status;
+            let mut retvl = SyncMessage::zero();
             let now = TimeStamp::now();
             retvl.set_created(now);
             retvl.set_source_id(self.config.id);
@@ -158,8 +158,7 @@ pub mod sync {
             retvl.set_position(cur_pos);
             retvl.set_state(cur_play_state);
 
-            let play_status = cur_play_state;
-            let changed_status = play_status != prev_status.state();
+            let changed_status = cur_play_state != prev_status.state();
             retvl.set_changed_state(changed_status);
             let expected_pos = prev_status.projected_to_time(now).position();
             let err = cur_pos.abs_sub(expected_pos);
