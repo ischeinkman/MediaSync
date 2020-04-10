@@ -19,6 +19,7 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 
 use std::sync::Arc;
+use tokio::runtime::Builder;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
@@ -26,13 +27,21 @@ pub type MyError = Box<dyn std::error::Error + Send + Sync>;
 
 type DynResult<T> = Result<T, MyError>;
 
-#[tokio::main]
-pub async fn main() -> DynResult<()> {
+pub fn main() -> DynResult<()> {
+    println!("Start.");
+    let mut runtime = Builder::new()
+        .threaded_scheduler()
+        .enable_io()
+        .enable_time()
+        .build()?;
     if use_gui() {
-        webui::run().await
+        println!("Start web.");
+        runtime.block_on(webui::run()).unwrap();
     } else {
-        cmdui::run().await
+        runtime.block_on(cmdui::run()).unwrap();
     }
+    println!("Ending.");
+    Ok(())
 }
 
 fn use_gui() -> bool {
