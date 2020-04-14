@@ -57,12 +57,21 @@ async fn webview_update_task<'a, T>(view: web_view::WebView<'a, T>) {
         };
         async { res }
     });
-    let throttled = tokio::time::throttle(throttle_time, step_loop);
-    throttled
-        .map(Ok)
-        .forward(futures::sink::drain())
-        .await
-        .unwrap();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let throttled = tokio::time::throttle(throttle_time, step_loop);
+        throttled
+            .map(Ok)
+            .forward(futures::sink::drain())
+            .await
+            .unwrap();
+    } else {
+        step_loop
+            .for_each(|_| {
+                std::thread::sleep(throttle_time);
+                async {}
+            })
+            .await;
+    }
 }
 
 async fn update_local_info<T>(network_ref: &Arc<NetworkManager>, handle: web_view::Handle<T>) {
@@ -232,6 +241,7 @@ pub async fn run() -> crate::DynResult<()> {
         let wrapped_player = SyncPlayerWrapper::new(raw_player, SyncConfig::new()).unwrap();
         Arc::new(Mutex::new(wrapped_player))
     };
+    println!("Selected player. Now updating local info.");
     local_tasks
         .run_until(update_local_info(&network_manager, handle))
         .await;
@@ -285,7 +295,7 @@ async fn build_webview(
 ) -> web_view::Handle<WebuiState> {
     let (mut hsnd, mut hrecv) = watch::channel(None);
     let network_ref = Arc::clone(&network_manager);
-    let retfut = async move {
+    let retfut = move || {
         let mut webview: WebView<'static, _> = web_view::builder()
             .content(web_view::Content::Html(WEBPAGE))
             .title("Ilan's VLCSync")
@@ -300,15 +310,19 @@ async fn build_webview(
         } else {
             log::info!("Handle sending.");
         }
-        hsnd.closed().await;
-        log::info!("Yielding.");
-        tokio::task::yield_now().await;
-        log::info!("Yielt.");
-        let ui_task = webview_update_task(webview);
-        log::info!("Made ui_task");
-        ui_task.await;
+        let mfut = async move {
+            hsnd.closed().await;
+            log::info!("Yielding.");
+            tokio::task::yield_now().await;
+            log::info!("Yielt.");
+            let ui_task = webview_update_task(webview);
+            log::info!("Made ui_task");
+            ui_task.await;
+        };
+        mfut
     };
-    task_set.spawn_local(retfut);
+
+    tokio::task::spawn(SpawnedThreadFuture::spawn_fut(retfut));
     task_set
         .run_until(async {
             loop {
@@ -318,4 +332,52 @@ async fn build_webview(
             }
         })
         .await
+}
+
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::sync::oneshot;
+pub struct SpawnedThreadFuture<T: Send + 'static> {
+    fut: oneshot::Receiver<T>,
+}
+
+impl<T: Send> SpawnedThreadFuture<T> {
+    pub fn spawn_fut<Gen: FnOnce() -> Fut + Send + 'static, Fut: Future<Output = T>>(
+        gen: Gen,
+    ) -> SpawnedThreadFuture<T> {
+        let (mut snd, rec) = oneshot::channel::<T>();
+        let _task = std::thread::spawn(move || {
+            let mut rt = tokio::runtime::Builder::new()
+                .enable_all()
+                .basic_scheduler()
+                .build()
+                .unwrap();
+            let work = gen();
+            let fut = async {
+                tokio::select! {
+                    w = work => {
+                        if let Err(_) = snd.send(w) {}
+                    },
+                    _ = snd.closed() => {}
+                }
+            };
+            rt.block_on(fut);
+        });
+        Self { fut: rec }
+    }
+}
+
+impl<T: Send + 'static> Future for SpawnedThreadFuture<T> {
+    type Output = T;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this: &mut Self = Pin::into_inner(self);
+        let fut = &mut this.fut;
+        futures::pin_mut!(fut);
+        let res = fut.poll(cx);
+        match res {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(res) => Poll::Ready(res.unwrap()),
+        }
+    }
 }
