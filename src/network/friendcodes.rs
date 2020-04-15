@@ -1,6 +1,6 @@
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
-fn decode_ipv4(digits: [char; 6]) -> u32 {
+fn decode_ipv4(digits: [char; 6]) -> Result<u32, FriendCodeError> {
     let mut retvl = 0;
     for (idx, &c) in digits.iter().enumerate() {
         let power = 5 - (idx as u32);
@@ -12,15 +12,15 @@ fn decode_ipv4(digits: [char; 6]) -> u32 {
         } else if c >= 'A' && c <= 'Z' {
             c as u32 - 'A' as u32 + 36
         } else {
-            0
+            return Err(FriendCodeError::InvalidCharacter(c));
         };
         retvl += coeff * scaled;
     }
 
-    retvl
+    Ok(retvl)
 }
 
-fn decode_ipv6(digits: [char; 22]) -> u128 {
+fn decode_ipv6(digits: [char; 22]) -> Result<u128, FriendCodeError>{
     let mut retvl = 0u128;
     for (idx, &c) in digits.iter().enumerate() {
         let power = 21 - (idx as u32);
@@ -37,7 +37,7 @@ fn decode_ipv6(digits: [char; 22]) -> u128 {
         retvl += coeff * scaled;
     }
 
-    retvl
+    Ok(retvl)
 }
 
 fn decode_port(digits: [char; 3]) -> u16 {
@@ -168,20 +168,20 @@ fn encode_socketaddrv6(addr: impl Into<SocketAddrV6>) -> [char; 25] {
     retvl
 }
 
-fn decode_socketaddrv4(code: [char; 9]) -> SocketAddrV4 {
+fn decode_socketaddrv4(code: [char; 9]) -> Result<SocketAddrV4, FriendCodeError> {
     let ip_bytes = [code[0], code[1], code[2], code[3], code[4], code[5]];
-    let ip_num = decode_ipv4(ip_bytes);
+    let ip_num = decode_ipv4(ip_bytes)?;
     let port_bytes = [code[6], code[7], code[8]];
     let port = decode_port(port_bytes);
-    SocketAddrV4::new(ip_num.into(), port)
+    Ok(SocketAddrV4::new(ip_num.into(), port))
 }
-fn decode_socketaddrv6(code: [char; 25]) -> SocketAddrV6 {
+fn decode_socketaddrv6(code: [char; 25]) -> Result<SocketAddrV6, FriendCodeError> {
     let mut ip_bytes = ['\0'; 22];
     (&mut ip_bytes).copy_from_slice(&code[..22]);
-    let ip_num = decode_ipv6(ip_bytes);
+    let ip_num = decode_ipv6(ip_bytes)?;
     let port_bytes = [code[22], code[23], code[24]];
     let port = decode_port(port_bytes);
-    SocketAddrV6::new(ip_num.into(), port, 0, 0)
+    Ok(SocketAddrV6::new(ip_num.into(), port, 0, 0))
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
@@ -191,6 +191,7 @@ pub struct FriendCode {
 #[derive(Eq, PartialEq, Debug)]
 pub enum FriendCodeError {
     InvalidLength(usize),
+    InvalidCharacter(char),
 }
 
 impl FriendCode {
@@ -202,23 +203,23 @@ impl FriendCode {
             for (out, byte) in buffer.iter_mut().zip(code_chars) {
                 *out = byte;
             }
-            Ok(FriendCode::from_code_v6(buffer))
+            FriendCode::from_code_v6(buffer)
         } else if code.len() == 9 {
             let mut buffer = ['\0'; 9];
             let code_chars = code.chars();
             for (out, byte) in buffer.iter_mut().zip(code_chars) {
                 *out = byte;
             }
-            Ok(FriendCode::from_code_v4(buffer))
+            FriendCode::from_code_v4(buffer)
         } else {
             Err(FriendCodeError::InvalidLength(code.len()))
         }
     }
-    pub fn from_code_v4(code: [char; 9]) -> Self {
-        FriendCode::from_addr(decode_socketaddrv4(code))
+    fn from_code_v4(code: [char; 9]) -> Result<Self, FriendCodeError> {
+        decode_socketaddrv4(code).map(FriendCode::from_addr)
     }
-    pub fn from_code_v6(code: [char; 25]) -> Self {
-        FriendCode::from_addr(decode_socketaddrv6(code))
+    fn from_code_v6(code: [char; 25]) -> Result<Self, FriendCodeError> {
+        decode_socketaddrv6(code).map(FriendCode::from_addr)
     }
 
     pub fn from_addr(addr: impl Into<SocketAddr>) -> Self {
@@ -257,14 +258,14 @@ mod test {
     fn test_ipv4_codec() {
         for _ in 0..TRIALS {
             let ip = rand::random();
-            assert_eq!(ip, decode_ipv4(encode_ipv4(ip)));
+            assert_eq!(ip, decode_ipv4(encode_ipv4(ip)).unwrap());
         }
     }
     #[test]
     fn test_ipv6_codec() {
         for _ in 0..TRIALS {
             let ip = rand::random();
-            assert_eq!(ip, decode_ipv6(encode_ipv6(ip)));
+            assert_eq!(ip, decode_ipv6(encode_ipv6(ip)).unwrap());
         }
     }
 }

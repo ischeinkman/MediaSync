@@ -101,8 +101,12 @@ async fn on_add_connection<T>(
 ) {
     let parsed = match FriendCode::from_code(code) {
         Ok(p) => p,
-        Err(_e) => todo!(),
+        Err(_e) => {
+            log::error!("Invalid code: {:?}", _e);
+            todo!()
+        }
     };
+    log::info!("Adding connection: {}", parsed.as_addr());
     let connection = match TcpStream::connect(parsed.as_addr()).await {
         Ok(c) => c,
         Err(_e) => todo!(),

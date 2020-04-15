@@ -149,6 +149,11 @@ pub async fn run() -> crate::DynResult<()> {
                 eprintln!("       Friend codes  can only be 9 (for IPv4) or 25 (for IPv6) characters long, but this code is length {}.", l);
                 return Err("".into());
             }
+            Err(FriendCodeError::InvalidCharacter(c)) => {
+                eprintln!("ERROR: {} is not a valid friend code.", code);
+                eprintln!("       Friend codes cannot contain character {}", c);
+                return Err("".into());
+            }
         };
         let stream = TcpStream::connect(addr.as_addr()).await?;
         network_manager.add_connection(stream).await?;
