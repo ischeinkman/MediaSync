@@ -49,7 +49,14 @@ impl HttpConfig {
 
     pub fn status_url(&self) -> String {
         let mut retvl: String = "http://".to_owned();
-        retvl.extend(self.bind_addr.to_string().chars());
+        if self.bind_addr.ip().is_loopback() {
+            use std::fmt::Write;
+            retvl.push_str("localhost");
+            write!(&mut retvl, ":{}", self.bind_addr.port()).unwrap();
+        }
+        else {
+            retvl.extend(self.bind_addr.to_string().chars());
+        }
         retvl.push_str("/requests/status.json");
         retvl
     }
@@ -194,7 +201,7 @@ impl VlcHttpPlayer {
             self.subprocess.replace(cur);
         } else {
         }
-        let auth_header = HeaderValue::from_str(&self.conf.authorization_header())?;
+        let auth_header = HeaderValue::from_str(&self.conf.authorization_header()).unwrap();
         let mut req = Request::new(Body::empty());
         req.headers_mut().insert(header::AUTHORIZATION, auth_header);
         let base_url = self.conf.status_url();
@@ -216,6 +223,7 @@ impl VlcHttpPlayer {
         *req.uri_mut() = url.parse().unwrap();
         let resp = self.client.request(req).await.unwrap();
         if !resp.status().is_success() {
+            log::error!("Error when making request to URL: {}", url);
             return Err(HttpStatusError {
                 code: resp.status(),
             }
@@ -289,7 +297,7 @@ impl SyncPlayer for VlcHttpPlayer {
             }
         }
         let fut = async {
-            let (pos, state) = self.do_http_request(None).await?;
+            let (pos, state) = self.do_http_request(None).await.unwrap();
             let now = std::time::Instant::now();
             self.results_cache.set(Some((now, pos, state)));
             Ok(state)
@@ -396,7 +404,7 @@ impl LengthEstimator {
             self.push_sample(sample);
         }
         let center = (max_time + min_time) / 2;
-        log::info!(
+        /*log::info!(
             "({}, {}, {}) + ({}, {}) => ({}, {}), ({}, {}) => ({}, {}) => {}_{} +- {}",
             sample.reported_pos,
             sample.reported_time,
@@ -412,7 +420,7 @@ impl LengthEstimator {
             center / 1000,
             center % 1000,
             (max_time - min_time) / 2
-        );
+        );*/
         return PlayerPosition::from_millis(center);
     }
 
