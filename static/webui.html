@@ -9,24 +9,49 @@
             }
             for (idx = 0; idx < code.length; idx++) {
                 var c = code.charCodeAt(idx);
-                var is_lower = 'a'.charCodeAt(0) <= c <= 'z'.charCodeAt(0);
-                var is_upper = 'A'.charCodeAt(0) <= c <= 'Z'.charCodeAt(0);
-                var is_num = '0'.charCodeAt(0) <= c <= '9'.charCodeAt(0);
-                if (!is_lower && !is_upper && !is_num) {
-                    return -2;
+                var is_lower = 'a'.charCodeAt(0) <= c && c <= 'z'.charCodeAt(0);
+                if(is_lower) {
+                    continue;
                 }
+                var is_upper = 'A'.charCodeAt(0) <= c && c <= 'Z'.charCodeAt(0);
+                if(is_upper) {
+                    continue;
+                }
+                var is_num = '0'.charCodeAt(0) <= c && c <= '9'.charCodeAt(0);
+                if(is_num) {
+                    continue;
+                }
+                return -2;
+            }
+            if(code.startsWith('00')) {
+                return -3;
             }
             return 0;
         };
         var on_add_connection = function () {
             var elm = document.getElementById('add_connection_code');
             var inp = elm.value;
-            if (validate_friendcode(inp) != 0) {
-                //TODO: This. 
-                elm.style.outlineColor = "red";
+            var err_code = validate_friendcode(inp);
+            var errelm = document.getElementById("add_connection_err");
+            if (err_code != 0) {
+                var msg;
+                if (err_code === -1) {
+                    msg = "Friend codes are either 9 or 25 characters long.";
+                }
+                else if(err_code === -2) {
+                    msg = "Friend codes only contain letters or numbers.";
+                }
+                else if(err_code === -3) {
+                    msg = "Friend code is for an invalid IP address.";
+                }
+                else {
+                    msg = "Unknown error code: " + err_code;
+                }
+                errelm.innerText = msg;
+                errelm.setAttribute("style", "display : visible;")
             }
             else {
-                elm.style.outlineColor = "";
+                errelm.setAttribute("style", "display : none;")
                 backend_interface.add_connection(inp);
                 elm.value = "";
             }
@@ -57,7 +82,8 @@
                 var lognode = document.createElement("div");
                 lognode.classList.add("log_line");
                 lognode.innerText += msg;
-                document.getElementById('log_view').appendChild(lognode);
+                var logview = document.getElementById('log_view') ;
+                logview.firstChild.before(lognode);
             },
             open_player_list: function (players) {
                 document.getElementById('main_view').style.display = 'none';
@@ -97,6 +123,9 @@
             margin: 0;
             padding : 0;
         }
+        button {
+            font-size:1em;
+        }
         #main_view {
             display: flex;
             flex-direction: row;
@@ -107,9 +136,27 @@
             max-height: 80%;
         }
 
-        #play_list_view {
+        #player_list_view {
             width: 100%;
             overflow-y: scroll;
+        }
+
+        .player_list_element {
+            margin-top: 2.5px;
+            margin-bottom: 2.5px;
+            padding-top: 5px;
+            padding-bottom: 5px;
+            /*min-width: max-content;*/
+            width: 100%;
+            justify-self: center;
+        }
+        .player_list_element:hover {
+            background-color: #BBB;
+        }
+
+        #player_list {
+            display : flex;
+            flex-direction: column;
         }
 
         .panel {
@@ -123,12 +170,6 @@
             border-width: 1px;
             border-style: solid;
             border-radius: 10px;
-        }
-
-        #local_con_info {
-        }
-
-        #remote_info {
         }
 
         header {
@@ -154,6 +195,13 @@
             margin-bottom: 5px;
             width: fit-content;
             align-self: center;
+            text-decoration: none;
+            box-shadow: none;
+            border-style: none;
+        }
+        
+        #open_public_button:hover {
+            background-color: rgb(0, 0, 192);
         }
 
         #add_connection_wrapper {
@@ -161,6 +209,9 @@
             flex-direction: row;
             padding: 10px;
 
+        }
+        #add_connection_err {
+            color: red;
         }
 
         #add_connection_code {
@@ -171,6 +222,15 @@
 
         #add_connection_button {
             margin: 5px;
+            background-color: #BBB;
+            border-style: solid;
+            border-width: 1px;
+            box-shadow: none;
+            border-color: #122;
+            border-radius: 10px;
+        }
+        #add_connection_button:hover{
+            background-color: #888;
         }
 
         #log_panel {
@@ -189,6 +249,7 @@
             overflow-y: scroll;
         }
         .log_line {
+            overflow-x: scroll;
             min-height: 20px;
             background-color: white;
             font-weight: bold;
@@ -212,17 +273,20 @@
         <section id="local_con_info" class="panel">
             <header>Local Information</header>
             <div id="local_con_info_body" class="panel_body"></div>
-            <div id="open_public_button" class="panel_body" onclick="backend_interface.open_public();">Open
-                Public</div>
+            <button id="open_public_button" class="panel_body" onclick="backend_interface.open_public();">Open
+                Public</button>
         </section>
         <section id="remote_info" class="panel">
             <header>Remote Connections</header>
             <div id="remote_info_body" class="panel_body"></div>
             <div id="add_connection_wrapper" class="panel_body">
                 <input id="add_connection_code" type="text">
-                <div id="add_connection_button" onclick="on_add_connection();">
+                <button id="add_connection_button" onclick="on_add_connection();">
                     +
-                </div>
+                </button>
+            </div>
+            <div id="add_connection_err" class="panel_body" style="display: none;">
+
             </div>
         </section>
     </div>
