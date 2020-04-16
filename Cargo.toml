@@ -9,7 +9,7 @@ edition = "2018"
 [dependencies]
 igd = {version = "0.10", features = ["aio"]}
 rand = "0.7"
-mpris = "2.0.0-rc2"
+mpris = {version = "2.0.0-rc2", optional=true}
 clap = "2.33"
 tokio = {version = "0.2", features = ["net", "sync", "io-util", "time", "rt-core", "rt-util", "stream", "process", "rt-threaded", "full"]}
 futures = "0.3"
@@ -21,3 +21,5 @@ hyper = "0.13"
 base64 = "0.12"
 
 [features]
+default = ["mprisplayer"]
+mprisplayer = ["mpris"]

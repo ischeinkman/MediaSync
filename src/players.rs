@@ -1,7 +1,23 @@
-mod mpris_player;
 mod vlcrc;
 mod vlchttp;
 use super::DynResult;
+
+#[cfg(all(feature="mprisplayer", target_family="unix"))]
+mod mpris_player;
+
+#[cfg(not(all(feature="mprisplayer", target_family="unix")))]
+mod mpris_player {
+    use super::{SyncPlayerList, DynResult, SyncPlayer};
+    pub struct MprisPlayerList {}
+    impl SyncPlayerList for MprisPlayerList {
+        fn new() -> DynResult<Self> {
+            Ok(Self{})
+        }
+        fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer>)>> {
+            Ok(vec![])
+        }
+    }
+}
 use mpris_player::MprisPlayerList;
 
 use super::traits::sync::{SyncPlayer, SyncPlayerList};
