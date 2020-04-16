@@ -17,10 +17,15 @@ pub struct CmdUi {}
 
 impl Log for CmdUi {
     fn log(&self, record: &Record) {
+        if let Some(pt) = record.module_path() {
+            if !pt.contains("vlcsync") {
+                return;
+            }
+        }
         if record.metadata().level() >= log::Level::Warn {
-            eprintln!("{}", record.args());
+            eprintln!("[{}][{}] {}",crate::TimeStamp::now().as_millis(), record.metadata().level(), record.args());
         } else {
-            println!("{}", record.args());
+            println!("[{}][{}] {}",crate::TimeStamp::now().as_millis(), record.metadata().level(), record.args());
         }
     }
     fn flush(&self) {
