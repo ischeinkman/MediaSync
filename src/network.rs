@@ -100,6 +100,7 @@ impl NetworkManager {
     }
 
     pub async fn add_connection(&self, con: TcpStream) -> DynResult<()> {
+        con.set_nodelay(true)?;
         let addr = con.local_addr()?;
         let (read, write) = tokio::io::split(con);
         let mut sources_lock = self.event_sources.lock().await;
@@ -112,26 +113,31 @@ impl NetworkManager {
 
     pub fn remote_event_stream(&self) -> impl Stream<Item = DynResult<Message>> {
         let sources = Arc::clone(&self.event_sources);
-        futures::stream::unfold(sources, |srcref| async move {
+        let undelayed = futures::stream::unfold(sources, |srcref| async move {
             let nxt = loop {
                 let mut sources_lock = srcref.lock().await;
                 if sources_lock.is_empty() {
                     drop(sources_lock);
-                    tokio::task::yield_now().await;
+                    tokio::time::delay_for(std::time::Duration::from_millis(10)).await;
                     continue;
                 } else {
-                    break sources_lock.next().await;
+                    let fut = sources_lock.next();
+                    let res = fut.await;
+                    drop(sources_lock);
+                    break res;
                 }
             };
             match nxt {
                 Some((_, n)) => {
                     let retvl = (n, srcref);
                     tokio::task::yield_now().await;
+                    tokio::time::delay_for(std::time::Duration::from_millis(10)).await;
                     Some(retvl)
                 }
                 None => Some((Err("No streams in sources!".to_owned().into()), srcref)),
             }
-        })
+        });
+        tokio::time::throttle(std::time::Duration::from_millis(10), undelayed)
     }
 
     pub async fn broadcast_event(&self, msg: Message) -> DynResult<()> {
@@ -199,6 +205,7 @@ impl BackgroundTask {
                         break;
                     }
                 };
+                con.set_nodelay(true).unwrap();
                 let addr = con.peer_addr().unwrap();
                 log::info!("New connection from addr: {:?}", addr);
                 let (read, write) = tokio::io::split(con);
