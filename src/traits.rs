@@ -41,8 +41,8 @@ pub mod sync {
 
     impl<T: SyncPlayer> SyncPlayerWrapper<T> {
         pub fn new(player: T, config: SyncConfig) -> DynResult<Self> {
-            let cur_state = player.get_state()?;
-            let cur_pos = player.get_pos()?;
+            let cur_state = player.get_state().unwrap();
+            let cur_pos = player.get_pos().unwrap();
             let cur_time = TimeStamp::now();
             let mut previous_status = SyncMessage::zero();
             previous_status.set_source_id(config.id);

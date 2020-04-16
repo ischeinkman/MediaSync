@@ -7,7 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-igd = {version = "0.10.0", features = ["aio"]}
+igd = {version = "0.10", features = ["aio"]}
 rand = "0.7"
 mpris = "2.0.0-rc2"
 clap = "2.33"
