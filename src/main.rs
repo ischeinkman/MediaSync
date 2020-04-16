@@ -27,6 +27,8 @@ pub type MyError = Box<dyn std::error::Error + Send + Sync>;
 
 type DynResult<T> = Result<T, MyError>;
 
+pub const PUSH_FREQUENCY_MILLIS: u64 = 100;
+
 pub fn main() -> DynResult<()> {
     let mut runtime = Builder::new()
         .threaded_scheduler()
@@ -42,7 +44,8 @@ pub fn main() -> DynResult<()> {
                 local_set.await;
                 res.await
             })
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
     } else {
         runtime
             .block_on(async {
@@ -50,7 +53,8 @@ pub fn main() -> DynResult<()> {
                 local_set.await;
                 res.await
             })
-            .unwrap().unwrap();
+            .unwrap()
+            .unwrap();
     }
     println!("Ending.");
     Ok(())
@@ -65,13 +69,12 @@ async fn local_broadcast_task(
     network_manager: Arc<NetworkManager>,
 ) {
     let local_stream = {
-        let push_frequency_millis = 100;
         let prev_instant = Instant::now();
         let now = TimeStamp::now();
         let next_instant = Instant::now();
 
-        let offset_millis = now.as_millis() % push_frequency_millis;
-        let delay_millis = 2 * push_frequency_millis - offset_millis;
+        let offset_millis = now.as_millis() % PUSH_FREQUENCY_MILLIS;
+        let delay_millis = 2 * PUSH_FREQUENCY_MILLIS - offset_millis;
 
         let avg_instant = prev_instant + (next_instant - prev_instant) / 2;
         let start_time = avg_instant + Duration::from_millis(delay_millis);
@@ -80,7 +83,7 @@ async fn local_broadcast_task(
 
         time_stream
             .map(Ok)
-            .try_for_each_concurrent(None, move |_tm| {
+            .try_for_each(move |_tm| {
                 let player_ref = Arc::clone(&player);
                 let network_ref = Arc::clone(&network_manager);
                 async move {
@@ -92,7 +95,6 @@ async fn local_broadcast_task(
                         }
                     };
                     network_ref.broadcast_event(player_state.into()).await?;
-                    tokio::task::yield_now().await;
                     Ok(())
                 }
             })
@@ -114,7 +116,7 @@ async fn remote_sink_task(
     let network_ref = Arc::clone(&network_manager);
     network_manager
         .remote_event_stream()
-        .try_for_each_concurrent(None, move |evt| {
+        .try_for_each(move |evt| {
             let player_ref = Arc::clone(&player_ref);
             let network_ref = Arc::clone(&network_ref);
             async move {

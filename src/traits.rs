@@ -37,6 +37,8 @@ pub mod sync {
         config: SyncConfig,
         previous_status: SyncMessage,
         previous_event_times: std::collections::HashMap<UserId, TimeStamp>,
+        last_state_push_time : TimeStamp, 
+        last_jump_time : TimeStamp,
     }
 
     impl<T: SyncPlayer> SyncPlayerWrapper<T> {
@@ -57,6 +59,8 @@ pub mod sync {
                 config,
                 previous_status,
                 previous_event_times,
+                last_jump_time: cur_time,
+                last_state_push_time : cur_time,
             })
         }
     }
@@ -64,6 +68,7 @@ pub mod sync {
     impl<T: SyncPlayer> SyncOps for SyncPlayerWrapper<T> {
         fn push_sync_status(&mut self, message: SyncMessage) -> DynResult<ShouldRebroadcast> {
             if message.source_id() == self.config.id {
+                //Don't repeat messages forever 
                 return Ok(false);
             }
             let has_newer = self
@@ -72,18 +77,31 @@ pub mod sync {
                 .map(|&ts| ts >= message.created())
                 .unwrap_or(false);
             if has_newer {
+                //We have newer.
                 return Ok(false);
+            }
+            let current_time = TimeStamp::now();
+            let dt = current_time.as_millis() - message.created().as_millis();
+            if dt >= (3 * crate::PUSH_FREQUENCY_MILLIS)/2 {
+                //log::debug!("Not syncing to remote due to age of {}. Flags: ({:?}, {:?})", dt,  message.changed_state(), message.jumped());
+                //It's been too long; wait for the next one.
+                //return Ok(false);
             }
 
             let mut next_state = self.previous_status;
 
             let current_state = self.player.get_state().unwrap();
-            if current_state != message.state() {
-                if message.changed_state() {
-                    log::info!("Got a state change! Now changing state to {:?}.", message.state());
+            if self.previous_status.state() != message.state() {
+                log::info!("Rectifying self with remote data {} millis old. ", dt);
+                if message.changed_state() && message.created() > self.last_state_push_time {
+                    log::info!(
+                        "Got a state change! Now changing state to {:?}.",
+                        message.state()
+                    );
                     self.player.set_state(message.state())?;
                     next_state.set_state(message.state());
                     next_state.set_created(TimeStamp::now());
+                    self.last_state_push_time = message.created();
                 } else if current_state != self.previous_status.state() {
                     log::warn!("  WARNING: Player changed state mid push.");
                 } else {
@@ -97,6 +115,7 @@ pub mod sync {
                         next_state.set_state(PlayerState::Paused);
                         next_state.set_created(TimeStamp::now());
                     }
+                    self.last_state_push_time = message.created();
                 }
             }
 
@@ -107,13 +126,17 @@ pub mod sync {
                 .position();
 
             let expected_pos = message.projected_to_time(current_time).position();
-            if current_pos.abs_sub(expected_pos) > self.config.pos_err_threshold {
+            if current_pos.abs_sub(expected_pos) > self.config.pos_err_threshold && message.created() > self.last_jump_time {
                 if message.jumped() {
-                    log::info!("Got a remote jump! Now jumping to {}.", expected_pos.as_millis());
+                    log::info!(
+                        "Got a remote jump! Now jumping to {}.",
+                        expected_pos.as_millis()
+                    );
                     let npos = expected_pos;
                     self.player.set_pos(npos)?;
                     next_state.set_position(npos);
                     next_state.set_created(TimeStamp::now());
+                    self.last_jump_time = message.created();
                 } else {
                     let player_pos = self.player.get_pos()?;
                     let different_mag = player_pos.abs_sub(current_pos);
@@ -121,23 +144,38 @@ pub mod sync {
                         || (player_pos < current_pos && self.config.jump_if_backwards)
                     {
                         log::warn!("  WARNING: Player jumped mid push.");
-                    } 
-                    else if player_pos.abs_sub(expected_pos) <= self.config.pos_err_threshold {
+                    } else if player_pos.abs_sub(expected_pos) <= self.config.pos_err_threshold {
                         log::warn!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
                         log::warn!("  Not rectifying since it seems our actual position is okay?");
                         next_state.set_position(player_pos);
                         next_state.set_created(TimeStamp::now());
-                    }
-                    else {
+                    } else {
                         log::warn!("  WARNING: Got a position desync with another player. We are at {} ({}), but they are at {}.", current_pos.as_millis(), player_pos.as_millis(), expected_pos.as_millis());
-                        log::warn!("         : ERR: {} ({}) VS {}", current_pos.abs_sub(expected_pos).as_millis(), player_pos.abs_sub(expected_pos).as_millis(), self.config.pos_err_threshold.as_millis());
+                        log::warn!(
+                            "ERR: {} ({}) VS {}",
+                            current_pos.abs_sub(expected_pos).as_millis(),
+                            player_pos.abs_sub(expected_pos).as_millis(),
+                            self.config.pos_err_threshold.as_millis()
+                        );
                         log::warn!("  Now attempting to rectify.");
                         if expected_pos < current_pos {
-                            let npos = expected_pos + TimeDelta::from_millis(self.config.pos_err_threshold.as_millis()/3);
+                            let npos = expected_pos
+                                + TimeDelta::from_millis(
+                                    self.config.pos_err_threshold.as_millis() / 3,
+                                );
                             self.player.set_pos(npos)?;
                             next_state.set_position(npos);
                             next_state.set_created(TimeStamp::now());
                         }
+                        else {
+                            //Did we miss a jump somewhere?
+                            let npos = expected_pos;
+                            self.player.set_pos(npos)?;
+                            next_state.set_position(npos);
+                            next_state.set_created(TimeStamp::now());
+
+                        }
+                        self.last_jump_time = message.created();
                     }
                 }
             }
@@ -165,7 +203,22 @@ pub mod sync {
             let jumped = (err > self.config.jump_threshold)
                 || (self.config.jump_if_backwards && cur_pos < expected_pos);
             retvl.set_jumped(jumped);
+            if retvl.changed_state() || retvl.jumped() {
+                log::info!(
+                    "Local player raised event flags: ({:?}, {:?}) with values ({:?}, {:?})",
+                    retvl.changed_state(),
+                    retvl.jumped(),
+                    retvl.state(),
+                    retvl.position()
+                );
+            }
             self.previous_status = retvl;
+            if changed_status {
+                self.last_state_push_time = now;
+            }
+            if jumped {
+                self.last_jump_time = now;
+            }
             Ok(retvl)
         }
     }
