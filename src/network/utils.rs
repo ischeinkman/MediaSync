@@ -4,18 +4,23 @@ use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 
 pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<TcpListener> {
-    let ip = local_network_ip().await?;
+    let ip = local_network_ip().await.unwrap();
     let port = random_port(min_port, max_port);
 
     let addr = SocketAddr::from((ip, port));
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await.unwrap();
     Ok(listener)
 }
 
 async fn local_network_ip() -> DynResult<IpAddr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000)).await?;
-    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000)).await?;
-    let got_addr = socket.local_addr()?;
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000))
+        .await
+        .unwrap();
+    socket
+        .connect((Ipv4Addr::new(8, 8, 8, 8), 4000))
+        .await
+        .unwrap();
+    let got_addr = socket.local_addr().unwrap();
     Ok(got_addr.ip())
 }
 
@@ -77,11 +82,14 @@ impl IgdMapping {
         args: IgdArgs,
         description: &str,
     ) -> DynResult<IgdMapping> {
-        let gateway = igd::aio::search_gateway(args.clone().search_args).await?;
+        let gateway: igd::aio::Gateway = igd::aio::search_gateway(args.clone().search_args)
+            .await
+            .unwrap();
         let lease_duration = args.lease_duration.as_secs() as u32;
         let public_addr = gateway
             .get_any_address(args.protocol, local_addr, lease_duration, description)
-            .await?;
+            .await
+            .unwrap();
         Ok(IgdMapping {
             local_addr: local_addr.into(),
             public_addr: public_addr.into(),
@@ -93,7 +101,8 @@ impl IgdMapping {
         let gateway = igd::aio::search_gateway(igd::SearchOptions {
             ..self.args.search_args
         })
-        .await?;
+        .await
+        .unwrap();
         match gateway
             .remove_port(self.args.protocol, self.public_addr.port())
             .await
