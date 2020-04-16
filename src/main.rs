@@ -28,17 +28,29 @@ pub type MyError = Box<dyn std::error::Error + Send + Sync>;
 type DynResult<T> = Result<T, MyError>;
 
 pub fn main() -> DynResult<()> {
-    println!("Start.");
     let mut runtime = Builder::new()
         .threaded_scheduler()
         .enable_io()
         .enable_time()
         .build()?;
+    let local_set = tokio::task::LocalSet::new();
+
     if use_gui() {
-        println!("Start web.");
-        runtime.block_on(webui::run()).unwrap();
+        runtime
+            .block_on(async {
+                let res = local_set.spawn_local(webui::run());
+                local_set.await;
+                res.await
+            })
+            .unwrap().unwrap();
     } else {
-        runtime.block_on(cmdui::run()).unwrap();
+        runtime
+            .block_on(async {
+                let res = local_set.spawn_local(cmdui::run());
+                local_set.await;
+                res.await
+            })
+            .unwrap().unwrap();
     }
     println!("Ending.");
     Ok(())

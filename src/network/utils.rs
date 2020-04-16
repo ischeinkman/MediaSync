@@ -106,7 +106,7 @@ impl IgdMapping {
 }
 impl Drop for IgdMapping {
     fn drop(&mut self) {
-        futures::executor::block_on(self.close_inner()).unwrap();
+        crate::utils::block_on(self.close_inner()).unwrap();
     }
 }
 

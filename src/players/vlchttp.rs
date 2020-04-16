@@ -155,7 +155,6 @@ impl std::error::Error for HttpStatusError {}
 pub struct VlcHttpPlayer {
     conf: HttpConfig,
     client: Client<HttpConnector>,
-    #[allow(unused)]
     subprocess: RefCell<SubprocessStatus>,
     length_estimator: Cell<LengthEstimator>,
     results_cache: Cell<Option<(std::time::Instant, PlayerPosition, PlayerState)>>,
@@ -176,7 +175,6 @@ impl VlcHttpPlayer {
             .set(Some((std::time::Instant::now(), pos, state)));
         Ok(retvl)
     }
-    #[allow(unused)]
     pub async fn new_subprocess(config: HttpConfig) -> DynResult<Self> {
         let retvl = Self {
             conf: config,
@@ -286,7 +284,7 @@ impl SyncPlayer for VlcHttpPlayer {
             self.results_cache.set(Some((now, pos, state)));
             Ok(pos)
         };
-        futures::executor::block_on(fut)
+        crate::utils::block_on(fut)
     }
     fn get_state(&self) -> DynResult<PlayerState> {
         let now = std::time::Instant::now();
@@ -302,7 +300,7 @@ impl SyncPlayer for VlcHttpPlayer {
             self.results_cache.set(Some((now, pos, state)));
             Ok(state)
         };
-        futures::executor::block_on(fut)
+        crate::utils::block_on(fut)
     }
     fn set_pos(&mut self, state: PlayerPosition) -> DynResult<()> {
         let fut = async {
@@ -314,7 +312,7 @@ impl SyncPlayer for VlcHttpPlayer {
             self.results_cache.set(Some((now, pos, state)));
             Ok(())
         };
-        futures::executor::block_on(fut)
+        crate::utils::block_on(fut)
     }
     fn set_state(&mut self, state: PlayerState) -> DynResult<()> {
         let fut = async {
@@ -327,7 +325,7 @@ impl SyncPlayer for VlcHttpPlayer {
             self.results_cache.set(Some((now, nxt.0, nxt.1)));
             Ok(())
         };
-        futures::executor::block_on(fut)
+        crate::utils::block_on(fut)
     }
 }
 
@@ -532,6 +530,6 @@ impl SyncPlayerList for VlcHttpList {
 
             Ok(mapped)
         };
-        futures::executor::block_on(fut)
+        crate::utils::block_on(fut)
     }
 }

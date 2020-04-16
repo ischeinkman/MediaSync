@@ -15,7 +15,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::{Stream, StreamMap};
 use tokio::sync::broadcast;
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tokio::task::JoinHandle;
 type EventStream = futures::stream::BoxStream<'static, DynResult<Message>>;
 type EventStreamStore = Arc<Mutex<StreamMap<SocketAddr, EventStream>>>;
 
@@ -172,8 +171,6 @@ impl Drop for NetworkManager {
 }
 
 struct BackgroundTask {
-    #[allow(unused)]
-    handle: JoinHandle<()>,
     die_signal: Option<oneshot::Sender<()>>,
     address_sink: broadcast::Sender<SocketAddr>,
 }
@@ -186,7 +183,7 @@ impl BackgroundTask {
     ) -> Self {
         let as2 = address_sink.clone();
         let (die_signal, kill_signal) = oneshot::channel::<()>();
-        let handle = tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             let mut constream = listener.incoming();
             let mut die_future = kill_signal.fuse();
             loop {
@@ -218,7 +215,6 @@ impl BackgroundTask {
         Self {
             die_signal: Some(die_signal),
             address_sink,
-            handle,
         }
     }
     pub fn abort(&mut self) {

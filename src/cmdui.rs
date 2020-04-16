@@ -10,7 +10,6 @@ use std::io::Write;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::task::LocalSet;
 
 use log::{set_boxed_logger, Log, Metadata, Record};
 
@@ -169,13 +168,12 @@ pub async fn run() -> crate::DynResult<()> {
     let network_manager = Arc::new(network_manager);
     let player = Arc::new(Mutex::new(player));
 
-    let task_set = LocalSet::new();
     let remote_stream = remote_sink_task(Arc::clone(&player), Arc::clone(&network_manager));
 
-    let _remote_stream_handle = task_set.spawn_local(remote_stream);
+    let _remote_stream_handle = tokio::task::spawn_local(remote_stream);
 
     let local_stream = local_broadcast_task(Arc::clone(&player), Arc::clone(&network_manager));
-    let _local_stream_handle = task_set.spawn_local(local_stream);
+    let _local_stream_handle = tokio::task::spawn_local(local_stream);
 
     let connection_updator = network_manager
         .new_connections()
@@ -190,6 +188,5 @@ pub async fn run() -> crate::DynResult<()> {
         });
     let _connection_updator_handle = tokio::spawn(connection_updator);
 
-    task_set.await;
     Ok(())
 }

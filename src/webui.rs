@@ -175,10 +175,7 @@ fn setup_con_updator(handle: &web_view::Handle<WebuiState>, netref: &Arc<Network
     log::info!("Connection updator made.");
 }
 
-async fn select_player(
-    handle: &web_view::Handle<WebuiState>,
-    local_tasks: &tokio::task::LocalSet,
-) -> Box<dyn SyncPlayer> {
+async fn select_player(handle: &web_view::Handle<WebuiState>) -> Box<dyn SyncPlayer> {
     let mut player_list = BulkSyncPlayerList::new().unwrap();
     let mut players = player_list.get_players().unwrap();
     let player_list_arg = players
@@ -202,21 +199,17 @@ async fn select_player(
         })
         .unwrap();
     log::info!("Player list command sent.");
-    let player_idx = local_tasks
-        .run_until(async {
-            loop {
-                match player_select_recv.next().await {
-                    Some(Ok(idx)) => {
-                        break idx;
-                    }
-                    Some(Err(tokio::sync::broadcast::RecvError::Lagged(_))) => {
-                        continue;
-                    }
-                    _a => todo!(),
-                }
+    let player_idx = loop {
+        match player_select_recv.next().await {
+            Some(Ok(idx)) => {
+                break idx;
             }
-        })
-        .await;
+            Some(Err(tokio::sync::broadcast::RecvError::Lagged(_))) => {
+                continue;
+            }
+            _a => todo!(),
+        }
+    };
     log::info!("Player selected.");
     handle
         .dispatch(|view| view.eval("frontend_interface.close_player_list()"))
@@ -226,8 +219,6 @@ async fn select_player(
 }
 
 pub async fn run() -> crate::DynResult<()> {
-    let local_tasks = tokio::task::LocalSet::new();
-
     log::info!("Start");
     let network_manager = {
         let listener = random_listener(10000, 30000).await?;
@@ -235,28 +226,29 @@ pub async fn run() -> crate::DynResult<()> {
     };
     log::info!("Net built.");
 
-    let handle = build_webview(&local_tasks, &network_manager).await;
+    let handle = build_webview(&network_manager).await;
     log::info!("UI task built.");
     setup_logger(&handle);
     setup_con_updator(&handle, &network_manager);
 
-    let player = {
-        let raw_player = select_player(&handle, &local_tasks).await;
-        let wrapped_player = SyncPlayerWrapper::new(raw_player, SyncConfig::new()).unwrap();
-        Arc::new(Mutex::new(wrapped_player))
-    };
-    println!("Selected player. Now updating local info.");
-    local_tasks
-        .run_until(update_local_info(&network_manager, handle))
-        .await;
-    let local_fut = crate::local_broadcast_task(Arc::clone(&player), Arc::clone(&network_manager));
-    let remote_fut = crate::remote_sink_task(Arc::clone(&player), Arc::clone(&network_manager));
+    let sync_task_generator = move || async move {
+        let player = {
+            let raw_player = select_player(&handle).await;
+            let wrapped_player = SyncPlayerWrapper::new(raw_player, SyncConfig::new()).unwrap();
+            Arc::new(Mutex::new(wrapped_player))
+        };
+        println!("Selected player. Now updating local info.");
+        update_local_info(&network_manager, handle).await;
+        let local_fut =
+            crate::local_broadcast_task(Arc::clone(&player), Arc::clone(&network_manager));
+        let remote_fut = crate::remote_sink_task(Arc::clone(&player), Arc::clone(&network_manager));
 
-    local_tasks.spawn_local(local_fut);
-    log::info!("local_fut spawned.");
-    local_tasks.spawn_local(remote_fut);
-    log::info!("remote_fut spawned.");
-    local_tasks.await;
+        tokio::task::spawn_local(local_fut);
+        log::info!("local_fut spawned.");
+        tokio::task::spawn_local(remote_fut);
+        log::info!("remote_fut spawned.");
+    };
+    crate::utils::generate_spawn(sync_task_generator);
     Ok(())
 }
 
@@ -293,10 +285,7 @@ fn invoke_handler(
     }
 }
 
-async fn build_webview(
-    task_set: &tokio::task::LocalSet,
-    network_manager: &Arc<NetworkManager>,
-) -> web_view::Handle<WebuiState> {
+async fn build_webview(network_manager: &Arc<NetworkManager>) -> web_view::Handle<WebuiState> {
     let (mut hsnd, mut hrecv) = watch::channel(None);
     let network_ref = Arc::clone(&network_manager);
     let retfut = move || {
@@ -326,62 +315,11 @@ async fn build_webview(
         mfut
     };
 
-    tokio::task::spawn(SpawnedThreadFuture::spawn_fut(retfut));
-    task_set
-        .run_until(async {
-            loop {
-                if let Some(Some(h)) = hrecv.recv().await {
-                    break h;
-                }
-            }
-        })
-        .await
-}
+    crate::utils::generate_spawn(retfut);
 
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::sync::oneshot;
-pub struct SpawnedThreadFuture<T: Send + 'static> {
-    fut: oneshot::Receiver<T>,
-}
-
-impl<T: Send> SpawnedThreadFuture<T> {
-    pub fn spawn_fut<Gen: FnOnce() -> Fut + Send + 'static, Fut: Future<Output = T>>(
-        gen: Gen,
-    ) -> SpawnedThreadFuture<T> {
-        let (mut snd, rec) = oneshot::channel::<T>();
-        let _task = std::thread::spawn(move || {
-            let mut rt = tokio::runtime::Builder::new()
-                .enable_all()
-                .basic_scheduler()
-                .build()
-                .unwrap();
-            let work = gen();
-            let fut = async {
-                tokio::select! {
-                    w = work => {
-                        if let Err(_) = snd.send(w) {}
-                    },
-                    _ = snd.closed() => {}
-                }
-            };
-            rt.block_on(fut);
-        });
-        Self { fut: rec }
-    }
-}
-
-impl<T: Send + 'static> Future for SpawnedThreadFuture<T> {
-    type Output = T;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this: &mut Self = Pin::into_inner(self);
-        let fut = &mut this.fut;
-        futures::pin_mut!(fut);
-        let res = fut.poll(cx);
-        match res {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(res) => Poll::Ready(res.unwrap()),
+    loop {
+        if let Some(Some(h)) = hrecv.recv().await {
+            break h;
         }
     }
 }
