@@ -12,7 +12,7 @@ mod cmdui;
 mod webui;
 use network::NetworkManager;
 use protocols::{Message, TimeStamp};
-use traits::sync::{SyncOps, SyncPlayer, SyncPlayerWrapper};
+use traits::sync::{SyncPlayer, SyncPlayerWrapper};
 
 use futures::future::FutureExt;
 use futures::StreamExt;
