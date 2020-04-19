@@ -129,6 +129,40 @@ impl Drop for IgdMapping {
     }
 }
 
+async fn request_public_if_needed(
+    local_addr: SocketAddr,
+    args: IgdArgs,
+) -> DynResult<Option<IgdMapping>> {
+    match local_addr {
+        SocketAddr::V4(addr) => {
+            let ip = addr.ip();
+            let is_valid = !ip.is_loopback() && !ip.is_broadcast() && !ip.is_unspecified();
+            if !is_valid {
+                return Err(
+                    format!("Error: got invalid local address {}:{}", ip, addr.port()).into(),
+                );
+            }
+            if !ip.is_private() {
+                return Ok(None);
+            }
+
+            let mapped = IgdMapping::request_any(
+                addr,
+                args,
+                &format!("MediaSync Mapping for local ip {}:{}", ip, addr.port()),
+            )
+            .await?;
+            Ok(Some(mapped))
+        }
+        SocketAddr::V6(addr) => Err(format!(
+            "Error: IPv6 address {}:{} is not yet supported.",
+            *addr.ip(),
+            addr.port()
+        )
+        .into()),
+    }
+}
+
 pub mod udp {
     use super::{IgdArgs, IgdMapping};
     use crate::DynResult;
@@ -155,34 +189,12 @@ pub mod udp {
     }
     impl PublicAddr {
         pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
-            match local_addr {
-                SocketAddr::V4(addr) => {
-                    let ip = addr.ip();
-                    if ip.is_loopback() || ip.is_broadcast() || ip.is_unspecified() {
-                        Err(
-                            format!("Error: got invalid local address {}:{}", ip, addr.port())
-                                .into(),
-                        )
-                    } else if ip.is_private() {
-                        let mut args = IgdArgs::default();
-                        args.protocol = igd::PortMappingProtocol::UDP;
-                        let mapped = IgdMapping::request_any(
-                            addr,
-                            args,
-                            &format!("IlSync Mapping for local ip {}:{}", ip, addr.port()),
-                        )
-                        .await?;
-                        Ok(PublicAddr::Igd(mapped))
-                    } else {
-                        Ok(PublicAddr::Raw(local_addr))
-                    }
-                }
-                SocketAddr::V6(addr) => Err(format!(
-                    "Error: IPv6 address {}:{} is not yet supported.",
-                    *addr.ip(),
-                    addr.port()
-                )
-                .into()),
+            let mut args = IgdArgs::default();
+            args.protocol = igd::PortMappingProtocol::UDP;
+            if let Some(public) = super::request_public_if_needed(local_addr, args).await? {
+                Ok(PublicAddr::Igd(public))
+            } else {
+                Ok(PublicAddr::Raw(local_addr))
             }
         }
     }
@@ -214,32 +226,12 @@ pub mod tcp {
     }
     impl PublicAddr {
         pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
-            match local_addr {
-                SocketAddr::V4(addr) => {
-                    let ip = addr.ip();
-                    if ip.is_loopback() || ip.is_broadcast() || ip.is_unspecified() {
-                        Err(
-                            format!("Error: got invalid local address {}:{}", ip, addr.port())
-                                .into(),
-                        )
-                    } else if ip.is_private() {
-                        let mapped = IgdMapping::request_any(
-                            addr,
-                            IgdArgs::default(),
-                            &format!("IlSync Mapping for local ip {}:{}", ip, addr.port()),
-                        )
-                        .await?;
-                        Ok(PublicAddr::Igd(mapped))
-                    } else {
-                        Ok(PublicAddr::Raw(local_addr))
-                    }
-                }
-                SocketAddr::V6(addr) => Err(format!(
-                    "Error: IPv6 address {}:{} is not yet supported.",
-                    *addr.ip(),
-                    addr.port()
-                )
-                .into()),
+            let mut args = IgdArgs::default();
+            args.protocol = igd::PortMappingProtocol::TCP;
+            if let Some(public) = super::request_public_if_needed(local_addr, args).await? {
+                Ok(PublicAddr::Igd(public))
+            } else {
+                Ok(PublicAddr::Raw(local_addr))
             }
         }
     }
