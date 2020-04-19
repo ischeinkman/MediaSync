@@ -12,6 +12,16 @@ pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<TcpListe
     Ok(listener)
 }
 
+#[allow(dead_code)]
+pub async fn random_listener_udp(min_port: u16, max_port: u16) -> DynResult<UdpSocket> {
+    let ip = local_network_ip().await.unwrap();
+    let port = random_port(min_port, max_port);
+
+    let addr = SocketAddr::from((ip, port));
+    let listener = UdpSocket::bind(addr).await.unwrap();
+    Ok(listener)
+}
+
 async fn local_network_ip() -> DynResult<IpAddr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000))
         .await
@@ -119,50 +129,120 @@ impl Drop for IgdMapping {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
-pub enum PublicAddr {
-    Igd(IgdMapping),
-    Raw(SocketAddr),
-}
-
-impl From<IgdMapping> for PublicAddr {
-    fn from(mapping: IgdMapping) -> PublicAddr {
-        PublicAddr::Igd(mapping)
+pub mod udp {
+    use super::{IgdArgs, IgdMapping};
+    use crate::DynResult;
+    use std::net::SocketAddr;
+    #[derive(Clone, Eq, PartialEq)]
+    pub enum PublicAddr {
+        Igd(IgdMapping),
+        Raw(SocketAddr),
     }
-}
 
-impl PublicAddr {
-    pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
-        match local_addr {
-            SocketAddr::V4(addr) => {
-                let ip = addr.ip();
-                if ip.is_loopback() || ip.is_broadcast() || ip.is_unspecified() {
-                    Err(format!("Error: got invalid local address {}:{}", ip, addr.port()).into())
-                } else if ip.is_private() {
-                    let mapped = IgdMapping::request_any(
-                        addr,
-                        IgdArgs::default(),
-                        &format!("IlSync Mapping for local ip {}:{}", ip, addr.port()),
-                    )
-                    .await?;
-                    Ok(PublicAddr::Igd(mapped))
-                } else {
-                    Ok(PublicAddr::Raw(local_addr))
-                }
+    impl From<IgdMapping> for PublicAddr {
+        fn from(mapping: IgdMapping) -> PublicAddr {
+            PublicAddr::Igd(mapping)
+        }
+    }
+
+    impl PublicAddr {
+        pub fn addr(&self) -> SocketAddr {
+            match self {
+                PublicAddr::Igd(mapping) => mapping.public_addr,
+                PublicAddr::Raw(addr) => *addr,
             }
-            SocketAddr::V6(addr) => Err(format!(
-                "Error: IPv6 address {}:{} is not yet supported.",
-                *addr.ip(),
-                addr.port()
-            )
-            .into()),
         }
     }
-
-    pub fn addr(&self) -> SocketAddr {
-        match self {
-            PublicAddr::Igd(mapping) => mapping.public_addr,
-            PublicAddr::Raw(addr) => *addr,
+    impl PublicAddr {
+        pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
+            match local_addr {
+                SocketAddr::V4(addr) => {
+                    let ip = addr.ip();
+                    if ip.is_loopback() || ip.is_broadcast() || ip.is_unspecified() {
+                        Err(
+                            format!("Error: got invalid local address {}:{}", ip, addr.port())
+                                .into(),
+                        )
+                    } else if ip.is_private() {
+                        let mut args = IgdArgs::default();
+                        args.protocol = igd::PortMappingProtocol::UDP;
+                        let mapped = IgdMapping::request_any(
+                            addr,
+                            args,
+                            &format!("IlSync Mapping for local ip {}:{}", ip, addr.port()),
+                        )
+                        .await?;
+                        Ok(PublicAddr::Igd(mapped))
+                    } else {
+                        Ok(PublicAddr::Raw(local_addr))
+                    }
+                }
+                SocketAddr::V6(addr) => Err(format!(
+                    "Error: IPv6 address {}:{} is not yet supported.",
+                    *addr.ip(),
+                    addr.port()
+                )
+                .into()),
+            }
         }
     }
 }
+
+pub mod tcp {
+    use super::{IgdArgs, IgdMapping};
+    use crate::DynResult;
+    use std::net::SocketAddr;
+    #[derive(Clone, Eq, PartialEq)]
+    pub enum PublicAddr {
+        Igd(IgdMapping),
+        Raw(SocketAddr),
+    }
+
+    impl From<IgdMapping> for PublicAddr {
+        fn from(mapping: IgdMapping) -> PublicAddr {
+            PublicAddr::Igd(mapping)
+        }
+    }
+
+    impl PublicAddr {
+        pub fn addr(&self) -> SocketAddr {
+            match self {
+                PublicAddr::Igd(mapping) => mapping.public_addr,
+                PublicAddr::Raw(addr) => *addr,
+            }
+        }
+    }
+    impl PublicAddr {
+        pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
+            match local_addr {
+                SocketAddr::V4(addr) => {
+                    let ip = addr.ip();
+                    if ip.is_loopback() || ip.is_broadcast() || ip.is_unspecified() {
+                        Err(
+                            format!("Error: got invalid local address {}:{}", ip, addr.port())
+                                .into(),
+                        )
+                    } else if ip.is_private() {
+                        let mapped = IgdMapping::request_any(
+                            addr,
+                            IgdArgs::default(),
+                            &format!("IlSync Mapping for local ip {}:{}", ip, addr.port()),
+                        )
+                        .await?;
+                        Ok(PublicAddr::Igd(mapped))
+                    } else {
+                        Ok(PublicAddr::Raw(local_addr))
+                    }
+                }
+                SocketAddr::V6(addr) => Err(format!(
+                    "Error: IPv6 address {}:{} is not yet supported.",
+                    *addr.ip(),
+                    addr.port()
+                )
+                .into()),
+            }
+        }
+    }
+}
+
+pub use tcp::*;
