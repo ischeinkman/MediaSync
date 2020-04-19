@@ -1,25 +1,14 @@
 use crate::DynResult;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::UdpSocket;
 
-pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<TcpListener> {
+async fn random_localaddr(min_port: u16, max_port: u16) -> DynResult<SocketAddr> {
     let ip = local_network_ip().await.unwrap();
     let port = random_port(min_port, max_port);
 
     let addr = SocketAddr::from((ip, port));
-    let listener = TcpListener::bind(addr).await.unwrap();
-    Ok(listener)
-}
-
-#[allow(dead_code)]
-pub async fn random_listener_udp(min_port: u16, max_port: u16) -> DynResult<UdpSocket> {
-    let ip = local_network_ip().await.unwrap();
-    let port = random_port(min_port, max_port);
-
-    let addr = SocketAddr::from((ip, port));
-    let listener = UdpSocket::bind(addr).await.unwrap();
-    Ok(listener)
+    Ok(addr)
 }
 
 async fn local_network_ip() -> DynResult<IpAddr> {
@@ -164,9 +153,10 @@ async fn request_public_if_needed(
 }
 
 pub mod udp {
-    use super::{IgdArgs, IgdMapping};
+    use super::{random_localaddr, IgdArgs, IgdMapping};
     use crate::DynResult;
     use std::net::SocketAddr;
+    use tokio::net::UdpSocket;
     #[derive(Clone, Eq, PartialEq)]
     pub enum PublicAddr {
         Igd(IgdMapping),
@@ -198,12 +188,19 @@ pub mod udp {
             }
         }
     }
+    #[allow(dead_code)]
+    pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<UdpSocket> {
+        let addr = random_localaddr(min_port, max_port).await.unwrap();
+        let listener = UdpSocket::bind(addr).await.unwrap();
+        Ok(listener)
+    }
 }
 
 pub mod tcp {
-    use super::{IgdArgs, IgdMapping};
+    use super::{random_localaddr, IgdArgs, IgdMapping};
     use crate::DynResult;
     use std::net::SocketAddr;
+    use tokio::net::TcpListener;
     #[derive(Clone, Eq, PartialEq)]
     pub enum PublicAddr {
         Igd(IgdMapping),
@@ -234,6 +231,11 @@ pub mod tcp {
                 Ok(PublicAddr::Raw(local_addr))
             }
         }
+    }
+    pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<TcpListener> {
+        let addr = random_localaddr(min_port, max_port).await.unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
+        Ok(listener)
     }
 }
 
