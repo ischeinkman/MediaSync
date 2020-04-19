@@ -1,4 +1,4 @@
-use crate::network::utils::udp::PublicAddr;
+use crate::network::utils::udp::{PublicAddr, random_listener};
 use crate::protocols::Message;
 use crate::DynResult;
 
@@ -62,7 +62,13 @@ pub struct NetworkManager {
 }
 
 impl NetworkManager {
+
     #[allow(dead_code)]
+    pub async fn new_random_port(min_port : u16, max_port : u16) -> DynResult<Self> {
+        let listener = random_listener(min_port, max_port).await?;
+        Self::new(listener)
+    }
+
     pub fn new(listener: UdpSocket) -> DynResult<Self> {
         let local_addr = listener.local_addr().unwrap();
         let (rawrecv, rawsnd) = listener.split();

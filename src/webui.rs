@@ -1,5 +1,4 @@
 use crate::network::friendcodes::FriendCode;
-use crate::network::utils::random_listener;
 use crate::network::NetworkManager;
 use crate::players::BulkSyncPlayerList;
 use crate::traits::sync::{SyncConfig, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
@@ -107,7 +106,10 @@ async fn on_add_connection<T>(
         }
     };
     log::info!("Adding connection: {}", parsed.as_addr());
-    let connection = match TcpStream::connect(parsed.as_addr()).await {
+    let connection: TcpStream = match TcpStream::connect(parsed.as_addr()).await.and_then(|c| {
+        c.set_nodelay(true)?;
+        Ok(c)
+    }) {
         Ok(c) => c,
         Err(_e) => todo!(),
     };
@@ -220,10 +222,7 @@ async fn select_player(handle: &web_view::Handle<WebuiState>) -> Box<dyn SyncPla
 
 pub async fn run() -> crate::DynResult<()> {
     log::info!("Start");
-    let network_manager = {
-        let listener = random_listener(10000, 30000).await?;
-        Arc::new(NetworkManager::new(listener).unwrap())
-    };
+    let network_manager = Arc::new(NetworkManager::new_random_port(10000, 30000).await.unwrap());
     log::info!("Net built.");
 
     let handle = build_webview(&network_manager).await;
@@ -315,7 +314,9 @@ async fn build_webview(network_manager: &Arc<NetworkManager>) -> web_view::Handl
         mfut
     };
 
-    crate::utils::generate_spawn(retfut);
+    tokio::task::spawn_blocking(|| {
+        futures::executor::block_on(retfut());
+    });
 
     loop {
         if let Some(Some(h)) = hrecv.recv().await {

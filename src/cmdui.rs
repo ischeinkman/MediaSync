@@ -1,6 +1,4 @@
-use crate::network::{
-    friendcodes::FriendCode, friendcodes::FriendCodeError, utils::random_listener, NetworkManager,
-};
+use crate::network::{friendcodes::FriendCode, friendcodes::FriendCodeError, NetworkManager};
 use crate::players::BulkSyncPlayerList;
 use crate::traits::sync::{SyncConfig, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
 use crate::{local_broadcast_task, remote_sink_task};
@@ -23,9 +21,19 @@ impl Log for CmdUi {
             }
         }
         if record.metadata().level() >= log::Level::Warn {
-            eprintln!("[{}][{}] {}",crate::TimeStamp::now().as_millis(), record.metadata().level(), record.args());
+            eprintln!(
+                "[{}][{}] {}",
+                crate::TimeStamp::now().as_millis(),
+                record.metadata().level(),
+                record.args()
+            );
         } else {
-            println!("[{}][{}] {}",crate::TimeStamp::now().as_millis(), record.metadata().level(), record.args());
+            println!(
+                "[{}][{}] {}",
+                crate::TimeStamp::now().as_millis(),
+                record.metadata().level(),
+                record.args()
+            );
         }
     }
     fn flush(&self) {
@@ -118,8 +126,7 @@ pub async fn run() -> crate::DynResult<()> {
 
     println!("Welcome to Ilan's MediaSync!");
     println!("Now starting communication thread...");
-    let listener = random_listener(10000, 30000).await?;
-    let network_manager = NetworkManager::new(listener)?;
+    let network_manager = NetworkManager::new_random_port(10000, 30000).await?;
     println!("Communication thread started!");
     println!(
         "Local network friend code: {}",
