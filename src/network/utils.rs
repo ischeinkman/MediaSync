@@ -194,13 +194,17 @@ pub mod udp {
         let listener = UdpSocket::bind(addr).await.unwrap();
         Ok(listener)
     }
+    #[allow(dead_code)]
+    pub async fn connect_to(addr : crate::network::friendcodes::FriendCode) -> DynResult<SocketAddr> {
+        Ok(addr.as_addr())
+    }
 }
 
 pub mod tcp {
     use super::{random_localaddr, IgdArgs, IgdMapping};
     use crate::DynResult;
     use std::net::SocketAddr;
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
     #[derive(Clone, Eq, PartialEq)]
     pub enum PublicAddr {
         Igd(IgdMapping),
@@ -236,6 +240,12 @@ pub mod tcp {
         let addr = random_localaddr(min_port, max_port).await.unwrap();
         let listener = TcpListener::bind(addr).await.unwrap();
         Ok(listener)
+    }
+
+    pub async fn connect_to(addr : crate::network::friendcodes::FriendCode) -> DynResult<TcpStream> {
+        let con = TcpStream::connect(addr.as_addr()).await?;
+        con.set_nodelay(true)?;
+        Ok(con)
     }
 }
 

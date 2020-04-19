@@ -6,7 +6,6 @@ use clap::{App, Arg};
 use futures::StreamExt;
 use std::io::Write;
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 use log::{set_boxed_logger, Log, Metadata, Record};
@@ -166,7 +165,7 @@ pub async fn run() -> crate::DynResult<()> {
                 return Err("".into());
             }
         };
-        let stream = TcpStream::connect(addr.as_addr()).await?;
+        let stream = crate::network::utils::connect_to(addr).await?;
         network_manager.add_connection(stream).await?;
     }
     if args.is_present("public") {

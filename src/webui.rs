@@ -8,7 +8,6 @@ use serde_json::Value as JSValue;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
@@ -106,10 +105,7 @@ async fn on_add_connection<T>(
         }
     };
     log::info!("Adding connection: {}", parsed.as_addr());
-    let connection: TcpStream = match TcpStream::connect(parsed.as_addr()).await.and_then(|c| {
-        c.set_nodelay(true)?;
-        Ok(c)
-    }) {
+    let connection = match crate::network::utils::connect_to(parsed).await {
         Ok(c) => c,
         Err(_e) => todo!(),
     };
