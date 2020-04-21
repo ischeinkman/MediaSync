@@ -2,7 +2,14 @@
 
 <head>
     <script>
-        var validate_friendcode = function (code = "") {
+        if (!String.prototype.startsWith) {
+            String.prototype.startsWith = function (searchString, position) {
+                position = position || 0;
+                return this.indexOf(searchString, position) === position;
+            };
+        }
+        var validate_friendcode = function (code) {
+            code = code || "";
             code = code.trim();
             if (code.length != 9 && code.length != 25) {
                 return -1;
@@ -10,20 +17,20 @@
             for (idx = 0; idx < code.length; idx++) {
                 var c = code.charCodeAt(idx);
                 var is_lower = 'a'.charCodeAt(0) <= c && c <= 'z'.charCodeAt(0);
-                if(is_lower) {
+                if (is_lower) {
                     continue;
                 }
                 var is_upper = 'A'.charCodeAt(0) <= c && c <= 'Z'.charCodeAt(0);
-                if(is_upper) {
+                if (is_upper) {
                     continue;
                 }
                 var is_num = '0'.charCodeAt(0) <= c && c <= '9'.charCodeAt(0);
-                if(is_num) {
+                if (is_num) {
                     continue;
                 }
                 return -2;
             }
-            if(code.startsWith('00')) {
+            if (code.startsWith('00')) {
                 return -3;
             }
             return 0;
@@ -38,10 +45,10 @@
                 if (err_code === -1) {
                     msg = "Friend codes are either 9 or 25 characters long.";
                 }
-                else if(err_code === -2) {
+                else if (err_code === -2) {
                     msg = "Friend codes only contain letters or numbers.";
                 }
-                else if(err_code === -3) {
+                else if (err_code === -3) {
                     msg = "Friend code is for an invalid IP address.";
                 }
                 else {
@@ -71,7 +78,8 @@
             set_connections: function (iplist) {
                 var inf = document.getElementById("remote_info_body");
                 inf.innerHTML = "";
-                for (con of iplist) {
+                for (conidx = 0; conidx < iplist.length; conidx++) {
+                    var con = iplist[conidx];
                     var newnode = document.createElement('div');
                     newnode.classList.add("remote_info_element");
                     newnode.innerHTML = 'Friend Code: ' + con.friend_code;
@@ -82,8 +90,8 @@
                 var lognode = document.createElement("div");
                 lognode.classList.add("log_line");
                 lognode.innerText += msg;
-                var logview = document.getElementById('log_view') ;
-                logview.firstChild.before(lognode);
+                var logview = document.getElementById('log_view');
+                logview.insertBefore(lognode, logview.hasChildNodes() ? logview.childNodes[0] : null);
             },
             open_player_list: function (players) {
                 document.getElementById('main_view').style.display = 'none';
@@ -121,11 +129,13 @@
     <style>
         body {
             margin: 0;
-            padding : 0;
+            padding: 0;
         }
+
         button {
-            font-size:1em;
+            font-size: 1em;
         }
+
         #main_view {
             display: flex;
             flex-direction: row;
@@ -150,12 +160,13 @@
             width: 100%;
             justify-self: center;
         }
+
         .player_list_element:hover {
             background-color: #BBB;
         }
 
         #player_list {
-            display : flex;
+            display: flex;
             flex-direction: column;
         }
 
@@ -199,7 +210,7 @@
             box-shadow: none;
             border-style: none;
         }
-        
+
         #open_public_button:hover {
             background-color: rgb(0, 0, 192);
         }
@@ -210,6 +221,7 @@
             padding: 10px;
 
         }
+
         #add_connection_err {
             color: red;
         }
@@ -229,7 +241,8 @@
             border-color: #122;
             border-radius: 10px;
         }
-        #add_connection_button:hover{
+
+        #add_connection_button:hover {
             background-color: #888;
         }
 
@@ -240,14 +253,16 @@
             bottom: 0;
             width: 100%;
             min-width: 0px;
-            margin : 0px;
-            padding : 0px;
+            margin: 0px;
+            padding: 0px;
         }
+
         #log_view {
             display: flex;
             flex-direction: column;
             overflow-y: scroll;
         }
+
         .log_line {
             overflow-x: scroll;
             min-height: 20px;
@@ -262,7 +277,7 @@
 
 <body>
     <div id='player_list_view'>
-        <section id = "player_list_panel" class="panel">
+        <section id="player_list_panel" class="panel">
             <header>Player List</header>
             <div id="player_list" class="panel_body">
 
