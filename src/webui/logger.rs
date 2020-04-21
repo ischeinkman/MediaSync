@@ -1,4 +1,4 @@
-use log::{Record, Metadata};
+use log::{Metadata, Record};
 pub struct WebLogger<T> {
     interface: web_view::Handle<T>,
 }
@@ -37,10 +37,11 @@ impl<T> log::Log for WebLogger<T> {
             record.args()
         );
         self.interface.dispatch(move |wv| {
-            wv.eval(&cmd).unwrap();
+            if let Err(e) = wv.eval(&cmd) {
+                log::error!("Logging dispatch error : {:?}", e);
+            }
             Ok(())
         }).unwrap();
     }
-    fn flush(&self) {
-    }
+    fn flush(&self) {}
 }
