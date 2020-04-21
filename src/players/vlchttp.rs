@@ -15,7 +15,7 @@ use crate::traits::sync::{SyncPlayer, SyncPlayerList};
 use crate::DynResult;
 
 #[cfg(target_os = "windows")]
-const BIN_PATH: &str = "C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe";
+const BIN_PATH: &str = "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe";
 
 #[cfg(target_family = "unix")]
 const BIN_PATH: &str = "vlc";
