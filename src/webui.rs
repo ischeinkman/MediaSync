@@ -12,9 +12,8 @@ use tokio::sync::broadcast;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use web_view::WebView;
-mod logger;
+use crate::logging::{WebLogSink, LogSinkWrapper, LogSinkConfig};
 
-use logger::WebLogger;
 const WEBPAGE: &str = include_str!("../static/webui.html");
 
 pub struct WebuiState {
@@ -148,9 +147,9 @@ fn update_remote_connections(view: &mut web_view::WebView<WebuiState>) -> web_vi
 
 fn setup_logger(handle: &web_view::Handle<WebuiState>) {
     let href = handle.clone();
+    let log_handle = LogSinkWrapper::get_handle();
     log::info!("Setting logger.");
-    log::set_boxed_logger(Box::from(WebLogger::<WebuiState>::from(href))).unwrap();
-    log::set_max_level(log::LevelFilter::max());
+    log_handle.add_logger(WebLogSink::new(href), LogSinkConfig::new().enable_all());
     log::info!("Logger set.");
 }
 

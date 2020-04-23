@@ -4,45 +4,10 @@ use crate::traits::sync::{SyncConfig, SyncPlayer, SyncPlayerList, SyncPlayerWrap
 use crate::{local_broadcast_task, remote_sink_task};
 use clap::{App, Arg};
 use futures::StreamExt;
-use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use log::{set_boxed_logger, Log, Metadata, Record};
-
-pub struct CmdUi {}
-
-impl Log for CmdUi {
-    fn log(&self, record: &Record) {
-        if let Some(pt) = record.module_path() {
-            if !pt.contains("vlcsync") {
-                return;
-            }
-        }
-        if record.metadata().level() >= log::Level::Warn {
-            eprintln!(
-                "[{}][{}] {}",
-                crate::TimeStamp::now().as_millis(),
-                record.metadata().level(),
-                record.args()
-            );
-        } else {
-            println!(
-                "[{}][{}] {}",
-                crate::TimeStamp::now().as_millis(),
-                record.metadata().level(),
-                record.args()
-            );
-        }
-    }
-    fn flush(&self) {
-        std::io::stdout().flush().unwrap();
-        std::io::stderr().flush().unwrap();
-    }
-    fn enabled(&self, _metadata: &Metadata) -> bool {
-        true
-    }
-}
+use crate::logging::{LogSinkConfig, LogSinkWrapper, StderrLogSink, StdoutLogSink};
 
 fn simpleui_select_player<'a>(
     options_vec: &mut Vec<(String, Box<dyn SyncPlayer + 'a>)>,
@@ -118,8 +83,12 @@ pub fn init_parser<'a, 'b>() -> App<'a, 'b> {
 }
 
 pub async fn run() -> crate::DynResult<()> {
-    set_boxed_logger(Box::new(CmdUi {})).unwrap();
-    log::set_max_level(log::LevelFilter::max());
+    let logger = LogSinkWrapper::get_handle();
+    logger.add_logger(StdoutLogSink::new(), LogSinkConfig::new().enable_all());
+    logger.add_logger(
+        StderrLogSink::new(),
+        LogSinkConfig::new().with_filter(log::LevelFilter::Warn),
+    );
     let arg_parser = init_parser();
     let args = arg_parser.get_matches();
 

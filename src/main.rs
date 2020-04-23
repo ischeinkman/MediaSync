@@ -7,7 +7,7 @@ mod players;
 mod network;
 
 mod traits;
-
+mod logging;
 mod cmdui;
 mod webui;
 use network::NetworkManager;
