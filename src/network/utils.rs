@@ -154,6 +154,7 @@ async fn request_public_if_needed(
 
 pub mod udp {
     use super::{random_localaddr, IgdArgs, IgdMapping};
+    //use crate::network::stun::StunMapping;
     use crate::DynResult;
     use std::net::SocketAddr;
     use tokio::net::UdpSocket;
@@ -161,6 +162,7 @@ pub mod udp {
     pub enum PublicAddr {
         Igd(IgdMapping),
         Raw(SocketAddr),
+        //Stun(StunMapping),
     }
 
     impl From<IgdMapping> for PublicAddr {
@@ -174,15 +176,22 @@ pub mod udp {
             match self {
                 PublicAddr::Igd(mapping) => mapping.public_addr,
                 PublicAddr::Raw(addr) => *addr,
+                //PublicAddr::Stun(stun) => stun.public_addr(),
             }
         }
     }
+
     impl PublicAddr {
-        pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
+        pub async fn request_public(
+            local_connection: &mut tokio::net::UdpSocket,
+        ) -> DynResult<PublicAddr> {
+            let local_addr = local_connection.local_addr()?;
             let mut args = IgdArgs::default();
             args.protocol = igd::PortMappingProtocol::UDP;
             if let Some(public) = super::request_public_if_needed(local_addr, args).await? {
                 Ok(PublicAddr::Igd(public))
+            // } else if let Some(addr) = StunMapping::get_mapping(local_connection).await? {
+            //     Ok(PublicAddr::Stun(addr))
             } else {
                 Ok(PublicAddr::Raw(local_addr))
             }
@@ -195,7 +204,9 @@ pub mod udp {
         Ok(listener)
     }
     #[allow(dead_code)]
-    pub async fn connect_to(addr : crate::network::friendcodes::FriendCode) -> DynResult<SocketAddr> {
+    pub async fn connect_to(
+        addr: crate::network::friendcodes::FriendCode,
+    ) -> DynResult<SocketAddr> {
         Ok(addr.as_addr())
     }
 }
@@ -242,11 +253,12 @@ pub mod tcp {
         Ok(listener)
     }
 
-    pub async fn connect_to(addr : crate::network::friendcodes::FriendCode) -> DynResult<TcpStream> {
+    #[allow(dead_code)]
+    pub async fn connect_to(addr: crate::network::friendcodes::FriendCode) -> DynResult<TcpStream> {
         let con = TcpStream::connect(addr.as_addr()).await?;
         con.set_nodelay(true)?;
         Ok(con)
     }
 }
 
-pub use tcp::*;
+pub use udp::*;

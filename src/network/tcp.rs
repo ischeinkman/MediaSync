@@ -41,7 +41,7 @@ impl EventSink {
 }
 
 type EventSinkStore = Arc<Mutex<Vec<EventSink>>>;
-
+#[allow(dead_code)]
 pub struct NetworkManager {
     local_addr: SocketAddr,
     public_addr: RwLock<Option<PublicAddr>>,
@@ -50,6 +50,7 @@ pub struct NetworkManager {
     connection_task: BackgroundTask,
 }
 
+#[allow(dead_code)]
 impl NetworkManager {
     #[allow(dead_code)]
     pub async fn new_random_port(min_port : u16, max_port : u16) -> DynResult<Self> {

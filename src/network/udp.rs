@@ -1,7 +1,8 @@
-use crate::network::utils::udp::{PublicAddr, random_listener};
+use crate::network::utils::udp::{random_listener, PublicAddr};
 use crate::protocols::Message;
 use crate::DynResult;
 
+use futures::stream::FuturesUnordered;
 use futures::StreamExt as FutureStreamExt;
 use futures::TryStreamExt as FutureTryStreamExt;
 use std::net::SocketAddr;
@@ -13,17 +14,24 @@ use tokio::sync::mpsc;
 use tokio::sync::{Mutex, RwLock};
 
 pub fn make_event_stream(
-    reader: Arc<Mutex<RecvHalf>>,
+    reader: Arc<Mutex<Vec<RecvHalf>>>,
 ) -> futures::stream::BoxStream<'static, DynResult<(SocketAddr, Message)>> {
     futures::stream::unfold(reader, move |rdr| async move {
-        let mut buff = [0; 32];
         let mut rdrlock = rdr.lock().await;
-        let res = rdrlock.recv_from(&mut buff).await;
+        let mut futs: FuturesUnordered<_> = rdrlock
+            .iter_mut()
+            .map(|sock| async move {
+                let mut buff = [0; 32];
+                let res = sock.recv_from(&mut buff).await;
+                res.map_err(|e| e.into()).and_then(|(_, addr)| {
+                    let msg = Message::parse_block(buff)?;
+                    Ok((addr, msg))
+                })
+            })
+            .collect();
+        let nxt = futs.select_next_some().await;
+        drop(futs);
         drop(rdrlock);
-        let nxt = res.map_err(|e| e.into()).and_then(|(_, addr)| {
-            let msg = Message::parse_block(buff)?;
-            Ok((addr, msg))
-        });
         Some((nxt, rdr))
     })
     .boxed()
@@ -31,7 +39,7 @@ pub fn make_event_stream(
 
 pub struct EventSink {
     addresses: Arc<RwLock<Vec<SocketAddr>>>,
-    sender: SendHalf,
+    senders: Vec<SendHalf>,
 }
 
 impl EventSink {
@@ -43,7 +51,18 @@ impl EventSink {
             let addresses = self.addresses.read().await;
             let mut retvl = Vec::new();
             for addr in addresses.iter() {
-                let res = self.sender.send_to(&msg.into_block(), addr).await;
+                let mut ra = self
+                    .senders
+                    .iter_mut()
+                    .map(|snd| async move { snd.send_to(&msg.into_block(), addr).await })
+                    .collect::<FuturesUnordered<_>>();
+                let mut cur_res = Err(std::io::Error::from(std::io::ErrorKind::NotConnected));
+                while cur_res.is_err() {
+                    if let Some(nxt) = ra.next().await {
+                        cur_res = nxt;
+                    }
+                }
+                let res = cur_res;
                 retvl.push((addr.clone(), res.map(|_| ())));
             }
             futures::stream::iter(retvl)
@@ -58,13 +77,12 @@ pub struct NetworkManager {
     connection_addrs: Arc<RwLock<Vec<SocketAddr>>>,
     event_sinks: Mutex<EventSink>,
     new_connections_sink: Arc<SpmcSend<SocketAddr>>,
-    recv: Arc<Mutex<RecvHalf>>,
+    recv: Arc<Mutex<Vec<RecvHalf>>>,
 }
 
 impl NetworkManager {
-
     #[allow(dead_code)]
-    pub async fn new_random_port(min_port : u16, max_port : u16) -> DynResult<Self> {
+    pub async fn new_random_port(min_port: u16, max_port: u16) -> DynResult<Self> {
         let listener = random_listener(min_port, max_port).await?;
         Self::new(listener)
     }
@@ -72,11 +90,11 @@ impl NetworkManager {
     pub fn new(listener: UdpSocket) -> DynResult<Self> {
         let local_addr = listener.local_addr().unwrap();
         let (rawrecv, rawsnd) = listener.split();
-        let recv = Arc::new(Mutex::new(rawrecv));
+        let recv = Arc::new(Mutex::new(vec![rawrecv]));
         let connection_addrs = Arc::new(RwLock::new(Vec::new()));
         let event_sinks = Mutex::new(EventSink {
             addresses: Arc::clone(&connection_addrs),
-            sender: rawsnd,
+            senders: vec![rawsnd],
         });
         let new_connections_sink = Arc::new(SpmcSend::new());
         let retvl = Self {
@@ -115,8 +133,16 @@ impl NetworkManager {
         if public_addr_lock.is_some() {
             return Ok(());
         }
-        let new_public = PublicAddr::request_public(self.local_addr).await?;
-        *public_addr_lock = Some(new_public);
+        let local_ip = self.local_addr.ip();
+        let mut new_port = UdpSocket::bind((local_ip, 0)).await?;
+        let pubaddr = PublicAddr::request_public(&mut new_port).await?;
+
+        let (new_recv, new_send) = new_port.split();
+        let mut sink_lock = self.event_sinks.lock().await;
+        let mut stream_lock = self.recv.lock().await;
+        sink_lock.senders.push(new_send);
+        stream_lock.push(new_recv);
+        *public_addr_lock = Some(pubaddr);
         Ok(())
     }
 
@@ -135,8 +161,13 @@ impl NetworkManager {
             let constream_ref = Arc::clone(&constream_ref);
             let conref = Arc::clone(&conref);
             async move {
-                conref.write().await.push(addr.clone());
-                constream_ref.send(addr).await;
+                let existing_lock = conref.read().await;
+                let already_exists = existing_lock.contains(&addr);
+                drop(existing_lock);
+                if !already_exists {
+                    conref.write().await.push(addr.clone());
+                    constream_ref.send(addr).await;
+                }
                 Ok(msg)
             }
         })
