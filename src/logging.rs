@@ -30,6 +30,7 @@ pub struct LogSinkConfig {
     only_local: bool,
 }
 
+#[allow(dead_code)]
 impl LogSinkConfig {
     pub fn new() -> Self {
         Self::default()
@@ -113,6 +114,7 @@ lazy_static::lazy_static! {
     };
 }
 
+#[allow(dead_code)]
 impl LogSinkWrapper {
     fn new() -> Self {
         Self {
@@ -224,6 +226,7 @@ pub struct FileLogSink {
     output: Mutex<File>,
 }
 
+#[allow(dead_code)]
 impl FileLogSink {
     pub fn new(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let pathcow = Cow::Owned(path.as_ref().to_owned());
