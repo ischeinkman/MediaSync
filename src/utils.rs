@@ -76,3 +76,113 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         }
     }
 }
+
+#[derive(PartialEq)]
+pub enum AllowOnlyOneError<T: PartialEq> {
+    NoneFound,
+    GotSecond(T),
+}
+impl<T: PartialEq> std::fmt::Debug for AllowOnlyOneError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Found multiple values in stream.")
+    }
+}
+
+impl<T: PartialEq> std::fmt::Display for AllowOnlyOneError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Found multiple values in stream.")
+    }
+}
+
+impl<T: PartialEq> std::error::Error for AllowOnlyOneError<T> {}
+
+pub struct AllowOnlyOne<T: PartialEq> {
+    state: Result<T, AllowOnlyOneError<T>>,
+}
+
+impl<T: PartialEq> AsRef<Result<T, AllowOnlyOneError<T>>> for AllowOnlyOne<T> {
+    fn as_ref(&self) -> &Result<T, AllowOnlyOneError<T>> {
+        &self.state
+    }
+}
+
+impl<T: PartialEq> From<AllowOnlyOne<T>> for Result<T, AllowOnlyOneError<T>> {
+    fn from(wrapped: AllowOnlyOne<T>) -> Self {
+        wrapped.state
+    }
+}
+
+impl<T: PartialEq> AllowOnlyOne<T> {
+    pub fn new() -> Self {
+        Self {
+            state: Err(AllowOnlyOneError::NoneFound),
+        }
+    }
+    pub fn from_first(cur: T) -> Self {
+        Self { state: Ok(cur) }
+    }
+    pub fn from_second(second: T) -> Self {
+        Self {
+            state: Err(AllowOnlyOneError::GotSecond(second)),
+        }
+    }
+    pub fn has_second(&self) -> bool {
+        if let Err(AllowOnlyOneError::GotSecond(_)) = self.state {
+            true
+        } else {
+            false
+        }
+    }
+    pub fn push_next(&mut self, next: T) {
+        let nxt = std::mem::take(self).with_next(next);
+        std::mem::replace(self, nxt);
+    }
+    pub fn with_next(self, next: T) -> Self {
+        match self.state {
+            Ok(cur) => {
+                if cur == next {
+                    Self::from_first(cur)
+                } else {
+                    Self::from_second(next)
+                }
+            }
+            Err(AllowOnlyOneError::NoneFound) => Self::from_first(next),
+            Err(AllowOnlyOneError::GotSecond(err)) => Self::from_second(err),
+        }
+    }
+
+    pub fn into_res(self) -> Result<T, AllowOnlyOneError<T>> {
+        self.state
+    }
+}
+
+impl<T: PartialEq> Default for AllowOnlyOne<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: PartialEq> std::iter::Extend<T> for AllowOnlyOne<T> {
+    fn extend<Iter: IntoIterator<Item = T>>(&mut self, iter: Iter) {
+        if self.has_second() {
+            return;
+        }
+        for item in iter {
+            self.push_next(item);
+        }
+    }
+}
+
+impl<T: PartialEq> std::iter::FromIterator<T> for AllowOnlyOne<T> {
+    fn from_iter<Iter: IntoIterator<Item = T>>(iter: Iter) -> Self {
+        let mut retvl = Self::new();
+        for itm in iter {
+            retvl = retvl.with_next(itm);
+            if retvl.has_second() {
+                break;
+            }
+        }
+        retvl
+    }
+}
+

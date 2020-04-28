@@ -20,6 +20,8 @@ serde = {version = "1.0", features=["derive"]}
 hyper = "0.13"
 base64 = "0.12"
 lazy_static = "1.4"
+stun_codec = "0.1"
+bytecodec = "0.4"
 
 [features]
 default = ["mprisplayer"]

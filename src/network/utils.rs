@@ -154,7 +154,7 @@ async fn request_public_if_needed(
 
 pub mod udp {
     use super::{random_localaddr, IgdArgs, IgdMapping};
-    //use crate::network::stun::StunMapping;
+    use crate::network::stun::StunMapping;
     use crate::DynResult;
     use std::net::SocketAddr;
     use tokio::net::UdpSocket;
@@ -162,7 +162,7 @@ pub mod udp {
     pub enum PublicAddr {
         Igd(IgdMapping),
         Raw(SocketAddr),
-        //Stun(StunMapping),
+        Stun(StunMapping),
     }
 
     impl From<IgdMapping> for PublicAddr {
@@ -176,7 +176,7 @@ pub mod udp {
             match self {
                 PublicAddr::Igd(mapping) => mapping.public_addr,
                 PublicAddr::Raw(addr) => *addr,
-                //PublicAddr::Stun(stun) => stun.public_addr(),
+                PublicAddr::Stun(stun) => stun.public_addr(),
             }
         }
     }
@@ -190,8 +190,8 @@ pub mod udp {
             args.protocol = igd::PortMappingProtocol::UDP;
             if let Some(public) = super::request_public_if_needed(local_addr, args).await? {
                 Ok(PublicAddr::Igd(public))
-            // } else if let Some(addr) = StunMapping::get_mapping(local_connection).await? {
-            //     Ok(PublicAddr::Stun(addr))
+            } else if let Some(addr) = StunMapping::get_mapping(local_connection).await? {
+                Ok(PublicAddr::Stun(addr))
             } else {
                 Ok(PublicAddr::Raw(local_addr))
             }
