@@ -45,6 +45,7 @@ pub enum StunMappingError {
     Codec(bytecodec::Error),
     BrokenMessage(BrokenMessageError),
     MultipleBindings,
+    MappingNotEstablished,
 }
 impl Debug for StunMappingError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -53,6 +54,9 @@ impl Debug for StunMappingError {
             StunMappingError::Codec(inner) => Debug::fmt(inner, f),
             StunMappingError::BrokenMessage(inner) => Debug::fmt(inner, f),
             StunMappingError::MultipleBindings => write!(f, "StunMappingError::MultipleBindings"),
+            StunMappingError::MappingNotEstablished => {
+                write!(f, "StunMappingError::MappingNotEstablished")
+            }
         }
     }
 }
@@ -65,6 +69,9 @@ impl Display for StunMappingError {
             StunMappingError::BrokenMessage(inner) => Display::fmt(inner, f),
             StunMappingError::MultipleBindings => {
                 write!(f, "Multiple addresses returned from STUN.")
+            }
+            StunMappingError::MappingNotEstablished => {
+                write!(f, "STUN server responded with no public port mapping")
             }
         }
     }
@@ -166,13 +173,14 @@ pub struct StunMapping {
 }
 
 impl StunMapping {
+    #[allow(dead_code)]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
     pub fn public_addr(&self) -> SocketAddr {
         self.public_addr
     }
-    pub async fn get_mapping(socket: &mut UdpSocket) -> Result<Option<Self>, StunMappingError> {
+    pub async fn get_mapping(socket: &mut UdpSocket) -> Result<Self, StunMappingError> {
         let server_iter = stun_servers();
         futures::pin_mut!(server_iter);
         let mut previous_addr: StunMappingError =
@@ -182,35 +190,17 @@ impl StunMapping {
             match pubres {
                 Ok(Some(public_addr)) => {
                     let local_addr = socket.local_addr()?;
-                    return Ok(Some(StunMapping {
+                    return Ok(StunMapping {
                         local_addr,
                         public_addr,
-                    }));
+                    });
                 }
                 Ok(None) => {
-                    return Ok(None);
+                    return Err(StunMappingError::MappingNotEstablished);
                 }
                 Err(e) => previous_addr = e.into(),
             }
         }
         Err(previous_addr)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::Ipv4Addr;
-    #[tokio::test]
-    async fn test1() {
-        let mut socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 36709))
-            .await
-            .unwrap();
-        println!("{:?}", socket.local_addr().unwrap());
-        let addr = super::StunMapping::get_mapping(&mut socket)
-            .await
-            .unwrap()
-            .unwrap();
-        println!("{:?}", addr);
     }
 }

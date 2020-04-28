@@ -1,25 +1,19 @@
-use crate::DynResult;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
-async fn random_localaddr(min_port: u16, max_port: u16) -> DynResult<SocketAddr> {
-    let ip = local_network_ip().await.unwrap();
+pub async fn random_localaddr(min_port: u16, max_port: u16) -> Result<SocketAddr, std::io::Error> {
+    let ip = local_network_ip().await?;
     let port = random_port(min_port, max_port);
 
     let addr = SocketAddr::from((ip, port));
     Ok(addr)
 }
 
-async fn local_network_ip() -> DynResult<IpAddr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000))
-        .await
-        .unwrap();
-    socket
-        .connect((Ipv4Addr::new(8, 8, 8, 8), 4000))
-        .await
-        .unwrap();
-    let got_addr = socket.local_addr().unwrap();
+async fn local_network_ip() -> Result<IpAddr, std::io::Error> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000)).await?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000)).await?;
+    let got_addr = socket.local_addr()?;
     Ok(got_addr.ip())
 }
 
@@ -34,6 +28,16 @@ pub struct IgdArgs {
     pub search_args: igd::SearchOptions,
     pub lease_duration: Duration,
     pub protocol: igd::PortMappingProtocol,
+}
+
+impl IgdArgs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_protocol(mut self, proto: igd::PortMappingProtocol) -> Self {
+        self.protocol = proto;
+        self
+    }
 }
 
 impl Default for IgdArgs {
@@ -76,19 +80,16 @@ pub struct IgdMapping {
 }
 
 impl IgdMapping {
-    pub async fn request_any(
+    async fn request_any(
         local_addr: SocketAddrV4,
         args: IgdArgs,
         description: &str,
-    ) -> DynResult<IgdMapping> {
-        let gateway: igd::aio::Gateway = igd::aio::search_gateway(args.clone().search_args)
-            .await
-            .unwrap();
+    ) -> Result<Self, igd::Error> {
+        let gateway: igd::aio::Gateway = igd::aio::search_gateway(args.clone().search_args).await?;
         let lease_duration = args.lease_duration.as_secs() as u32;
         let public_addr = gateway
             .get_any_address(args.protocol, local_addr, lease_duration, description)
-            .await
-            .unwrap();
+            .await?;
         Ok(IgdMapping {
             local_addr: local_addr.into(),
             public_addr: public_addr.into(),
@@ -96,12 +97,11 @@ impl IgdMapping {
         })
     }
 
-    async fn close_inner(&mut self) -> DynResult<()> {
+    async fn close_inner(&mut self) -> Result<(), igd::Error> {
         let gateway = igd::aio::search_gateway(igd::SearchOptions {
             ..self.args.search_args
         })
-        .await
-        .unwrap();
+        .await?;
         match gateway
             .remove_port(self.args.protocol, self.public_addr.port())
             .await
@@ -118,147 +118,229 @@ impl Drop for IgdMapping {
     }
 }
 
-async fn request_public_if_needed(
-    local_addr: SocketAddr,
-    args: IgdArgs,
-) -> DynResult<Option<IgdMapping>> {
-    match local_addr {
-        SocketAddr::V4(addr) => {
-            let ip = addr.ip();
-            let is_valid = !ip.is_loopback() && !ip.is_broadcast() && !ip.is_unspecified();
-            if !is_valid {
-                return Err(
-                    format!("Error: got invalid local address {}:{}", ip, addr.port()).into(),
-                );
-            }
-            if !ip.is_private() {
-                return Ok(None);
-            }
+use crate::network::stun::{StunMapping, StunMappingError};
+pub enum PublicAddr {
+    Igd(IgdMapping),
+    Raw(SocketAddr),
+    Stun(StunMapping),
+}
 
-            let mapped = IgdMapping::request_any(
-                addr,
-                args,
-                &format!("MediaSync Mapping for local ip {}:{}", ip, addr.port()),
-            )
-            .await?;
-            Ok(Some(mapped))
+#[derive(Debug)]
+pub enum PublicAddrError {
+    MachineLocal(SocketAddr),
+    InvalidAddress(SocketAddr),
+    Io(std::io::Error),
+    Ipv6NotYetImplemented(std::net::Ipv6Addr),
+    Igd(igd::Error),
+    Stun(StunMappingError),
+    InvalidProtocol(igd::PortMappingProtocol),
+}
+use std::fmt;
+impl fmt::Display for PublicAddrError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PublicAddrError::MachineLocal(addr) => f.write_fmt(format_args!(
+                "Error making public addr: {} is not an externally visible address.",
+                addr
+            )),
+            PublicAddrError::Io(ioerr) => {
+                f.write_fmt(format_args!("Error making public addr (IO): {}", ioerr))
+            }
+            PublicAddrError::InvalidAddress(addr) => f.write_fmt(format_args!(
+                "Error making public addr: {} is not a valid address.",
+                addr
+            )),
+            PublicAddrError::Ipv6NotYetImplemented(addr) => f.write_fmt(format_args!(
+                "Ipv6 is not yet supported for public addrs: {}",
+                addr
+            )),
+            PublicAddrError::Igd(igderror) => {
+                f.write_fmt(format_args!("Error making public addr (IGD): {}", igderror))
+            }
+            PublicAddrError::Stun(stunerror) => f.write_fmt(format_args!(
+                "Error making public addr (STUN): {}",
+                stunerror
+            )),
+            PublicAddrError::InvalidProtocol(proto) => {
+                let protostr = match proto {
+                    igd::PortMappingProtocol::TCP => "TCP",
+                    igd::PortMappingProtocol::UDP => "UDP",
+                };
+                f.write_fmt(format_args!(
+                    "Error making public addr: {} is not a valid protocol for this method.",
+                    protostr
+                ))
+            }
         }
-        SocketAddr::V6(addr) => Err(format!(
-            "Error: IPv6 address {}:{} is not yet supported.",
-            *addr.ip(),
-            addr.port()
-        )
-        .into()),
+    }
+}
+impl std::error::Error for PublicAddrError {}
+impl From<std::io::Error> for PublicAddrError {
+    fn from(inner: std::io::Error) -> Self {
+        Self::Io(inner)
+    }
+}
+impl From<igd::Error> for PublicAddrError {
+    fn from(inner: igd::Error) -> Self {
+        Self::Igd(inner)
     }
 }
 
-pub mod udp {
-    use super::{random_localaddr, IgdArgs, IgdMapping};
-    use crate::network::stun::StunMapping;
-    use crate::DynResult;
-    use std::net::SocketAddr;
-    use tokio::net::UdpSocket;
-    #[derive(Clone, Eq, PartialEq)]
-    pub enum PublicAddr {
-        Igd(IgdMapping),
-        Raw(SocketAddr),
-        Stun(StunMapping),
+fn filter_clean_addr(addr: SocketAddr) -> Result<SocketAddr, PublicAddrError> {
+    if addr.ip().is_loopback() {
+        return Err(PublicAddrError::MachineLocal(addr));
     }
-
-    impl From<IgdMapping> for PublicAddr {
-        fn from(mapping: IgdMapping) -> PublicAddr {
-            PublicAddr::Igd(mapping)
-        }
-    }
-
-    impl PublicAddr {
-        pub fn addr(&self) -> SocketAddr {
-            match self {
-                PublicAddr::Igd(mapping) => mapping.public_addr,
-                PublicAddr::Raw(addr) => *addr,
-                PublicAddr::Stun(stun) => stun.public_addr(),
+    let downcast_ip = match addr.ip() {
+        IpAddr::V4(inner) => IpAddr::V4(inner),
+        IpAddr::V6(inner) => match inner.to_ipv4() {
+            Some(ninner) => IpAddr::V4(ninner),
+            None => IpAddr::V6(inner),
+        },
+    };
+    match downcast_ip {
+        IpAddr::V4(ipv4) => {
+            if ipv4.is_link_local() {
+                return Err(PublicAddrError::MachineLocal(addr));
             }
-        }
-    }
-
-    impl PublicAddr {
-        pub async fn request_public(
-            local_connection: &mut tokio::net::UdpSocket,
-        ) -> DynResult<PublicAddr> {
-            let local_addr = local_connection.local_addr()?;
-            let mut args = IgdArgs::default();
-            args.protocol = igd::PortMappingProtocol::UDP;
-            if let Some(public) = super::request_public_if_needed(local_addr, args).await? {
-                Ok(PublicAddr::Igd(public))
-            } else if let Some(addr) = StunMapping::get_mapping(local_connection).await? {
-                Ok(PublicAddr::Stun(addr))
-            } else {
-                Ok(PublicAddr::Raw(local_addr))
+            if ipv4.is_broadcast() || ipv4.is_documentation() {
+                return Err(PublicAddrError::InvalidAddress(addr));
             }
+            return Ok(SocketAddr::new(downcast_ip, addr.port()));
         }
-    }
-    #[allow(dead_code)]
-    pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<UdpSocket> {
-        let addr = random_localaddr(min_port, max_port).await.unwrap();
-        let listener = UdpSocket::bind(addr).await.unwrap();
-        Ok(listener)
-    }
-    #[allow(dead_code)]
-    pub async fn connect_to(
-        addr: crate::network::friendcodes::FriendCode,
-    ) -> DynResult<SocketAddr> {
-        Ok(addr.as_addr())
+        IpAddr::V6(_ipv6) => {
+            //TODO: IPv6 validity checks.
+            return Ok(addr);
+        }
     }
 }
 
-pub mod tcp {
-    use super::{random_localaddr, IgdArgs, IgdMapping};
-    use crate::DynResult;
-    use std::net::SocketAddr;
-    use tokio::net::{TcpListener, TcpStream};
-    #[derive(Clone, Eq, PartialEq)]
-    pub enum PublicAddr {
-        Igd(IgdMapping),
-        Raw(SocketAddr),
-    }
-
-    impl From<IgdMapping> for PublicAddr {
-        fn from(mapping: IgdMapping) -> PublicAddr {
-            PublicAddr::Igd(mapping)
+impl PublicAddr {
+    pub fn addr(&self) -> SocketAddr {
+        match self {
+            PublicAddr::Raw(addr) => *addr,
+            PublicAddr::Igd(mapping) => mapping.public_addr,
+            PublicAddr::Stun(mapping) => mapping.public_addr(),
         }
     }
-
-    impl PublicAddr {
-        pub fn addr(&self) -> SocketAddr {
-            match self {
-                PublicAddr::Igd(mapping) => mapping.public_addr,
-                PublicAddr::Raw(addr) => *addr,
+    async fn try_already_public(addr: SocketAddr) -> Result<Self, PublicAddrError> {
+        let wrapped_ip = if addr.ip().is_unspecified() {
+            local_network_ip().await?
+        } else {
+            addr.ip()
+        };
+        if wrapped_ip.is_unspecified() {
+            return Err(PublicAddrError::InvalidAddress(addr));
+        }
+        match wrapped_ip {
+            IpAddr::V4(inner) => {
+                if inner.is_private() {
+                    Err(PublicAddrError::InvalidAddress(SocketAddr::new(
+                        wrapped_ip,
+                        addr.port(),
+                    )))
+                } else {
+                    Ok(Self::Raw(addr))
+                }
             }
+            IpAddr::V6(inner) => Err(PublicAddrError::Ipv6NotYetImplemented(inner)),
         }
     }
-    impl PublicAddr {
-        pub async fn request_public(local_addr: SocketAddr) -> DynResult<PublicAddr> {
-            let mut args = IgdArgs::default();
-            args.protocol = igd::PortMappingProtocol::TCP;
-            if let Some(public) = super::request_public_if_needed(local_addr, args).await? {
-                Ok(PublicAddr::Igd(public))
-            } else {
-                Ok(PublicAddr::Raw(local_addr))
+    async fn try_igd(
+        addr: SocketAddr,
+        proto: igd::PortMappingProtocol,
+    ) -> Result<Self, PublicAddrError> {
+        match addr {
+            SocketAddr::V4(inner) => {
+                let args = IgdArgs::new().with_protocol(proto);
+                let igdres =
+                    IgdMapping::request_any(inner, args, "MediaSync Public Address").await?;
+                return Ok(Self::Igd(igdres));
             }
+            SocketAddr::V6(inner) => Err(PublicAddrError::Ipv6NotYetImplemented(*inner.ip())),
         }
     }
-    pub async fn random_listener(min_port: u16, max_port: u16) -> DynResult<TcpListener> {
-        let addr = random_localaddr(min_port, max_port).await.unwrap();
-        let listener = TcpListener::bind(addr).await.unwrap();
-        Ok(listener)
+    async fn try_stun(con: &mut UdpSocket) -> Result<Self, PublicAddrError> {
+        match StunMapping::get_mapping(con).await {
+            Ok(mapping) => Ok(Self::Stun(mapping)),
+            Err(e) => Err(PublicAddrError::Stun(e)),
+        }
     }
 
-    #[allow(dead_code)]
-    pub async fn connect_to(addr: crate::network::friendcodes::FriendCode) -> DynResult<TcpStream> {
-        let con = TcpStream::connect(addr.as_addr()).await?;
-        con.set_nodelay(true)?;
-        Ok(con)
+    pub async fn request_public<'a>(
+        args: impl Into<OpenPublicArgs<'a>>,
+    ) -> Result<Self, PublicAddrError> {
+        let args = args.into();
+        let rawaddr = args.addr()?;
+        let addr = filter_clean_addr(rawaddr)?;
+        let noop_res = Self::try_already_public(addr).await;
+        let _noop_err = match noop_res {
+            Ok(ret) => {
+                return Ok(ret);
+            }
+            Err(e) => {
+                log::info!("Got error from NOOP public mapper: {}", e);
+                e
+            }
+        };
+        let proto = args.proto();
+        let igd_res = Self::try_igd(addr, proto).await;
+        let _igd_err = match igd_res {
+            Ok(ret) => {
+                return Ok(ret);
+            }
+            Err(e) => {
+                log::info!("Got error from IGD public mapper: {}", e);
+                e
+            }
+        };
+        let stun_res = if let OpenPublicArgs::UdpCon(con) = args {
+            Self::try_stun(con).await
+        } else {
+            Err(PublicAddrError::InvalidProtocol(
+                igd::PortMappingProtocol::TCP,
+            ))
+        };
+        let _stun_err = match stun_res {
+            Ok(ret) => {
+                return Ok(ret);
+            }
+            Err(e) => {
+                log::info!("Got error from STUN public mapper: {}", e);
+                e
+            }
+        };
+        Err(_igd_err)
     }
 }
 
-pub use udp::*;
+pub enum OpenPublicArgs<'a> {
+    TcpAddr(SocketAddr),
+    UdpCon(&'a mut UdpSocket),
+}
+
+impl<'a> OpenPublicArgs<'a> {
+    pub fn proto(&self) -> igd::PortMappingProtocol {
+        match self {
+            Self::TcpAddr(_) => igd::PortMappingProtocol::TCP,
+            Self::UdpCon(_) => igd::PortMappingProtocol::UDP,
+        }
+    }
+    pub fn addr(&self) -> Result<SocketAddr, std::io::Error> {
+        match self {
+            Self::TcpAddr(inner) => Ok(*inner),
+            Self::UdpCon(con) => con.local_addr(),
+        }
+    }
+}
+
+impl<'a> From<&'a mut UdpSocket> for OpenPublicArgs<'a> {
+    fn from(inner: &'a mut UdpSocket) -> Self {
+        Self::UdpCon(inner)
+    }
+}
+
+impl<'a> From<SocketAddr> for OpenPublicArgs<'a> {
+    fn from(inner: SocketAddr) -> Self {
+        Self::TcpAddr(inner)
+    }
+}

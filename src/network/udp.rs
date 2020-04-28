@@ -1,4 +1,5 @@
-use crate::network::utils::udp::{random_listener, PublicAddr};
+use crate::network::friendcodes::FriendCode;
+use crate::network::utils::{random_localaddr, PublicAddr};
 use crate::protocols::Message;
 use crate::DynResult;
 
@@ -13,7 +14,7 @@ use tokio::stream::Stream;
 use tokio::sync::mpsc;
 use tokio::sync::{Mutex, RwLock};
 
-pub fn make_event_stream(
+fn make_event_stream(
     reader: Arc<Mutex<Vec<RecvHalf>>>,
 ) -> futures::stream::BoxStream<'static, DynResult<(SocketAddr, Message)>> {
     futures::stream::unfold(reader, move |rdr| async move {
@@ -37,7 +38,7 @@ pub fn make_event_stream(
     .boxed()
 }
 
-pub struct EventSink {
+struct EventSink {
     addresses: Arc<RwLock<Vec<SocketAddr>>>,
     senders: Vec<SendHalf>,
 }
@@ -71,6 +72,7 @@ impl EventSink {
     }
 }
 
+#[allow(dead_code)]
 pub struct NetworkManager {
     local_addr: SocketAddr,
     public_addr: RwLock<Option<PublicAddr>>,
@@ -80,14 +82,15 @@ pub struct NetworkManager {
     recv: Arc<Mutex<Vec<RecvHalf>>>,
 }
 
+#[allow(dead_code)]
 impl NetworkManager {
-    #[allow(dead_code)]
     pub async fn new_random_port(min_port: u16, max_port: u16) -> DynResult<Self> {
-        let listener = random_listener(min_port, max_port).await?;
+        let addr = random_localaddr(min_port, max_port).await.unwrap();
+        let listener = UdpSocket::bind(addr).await.unwrap();
         Self::new(listener)
     }
 
-    pub fn new(listener: UdpSocket) -> DynResult<Self> {
+    fn new(listener: UdpSocket) -> DynResult<Self> {
         let local_addr = listener.local_addr().unwrap();
         let (rawrecv, rawsnd) = listener.split();
         let recv = Arc::new(Mutex::new(vec![rawrecv]));
@@ -108,7 +111,6 @@ impl NetworkManager {
         Ok(retvl)
     }
 
-    #[allow(dead_code)]
     pub fn new_connections(&self) -> impl Stream<Item = DynResult<SocketAddr>> {
         let stream = self.new_connections_sink.new_recv();
         futures::stream::unfold(stream, |mut strm| async {
@@ -117,17 +119,14 @@ impl NetworkManager {
         })
     }
 
-    #[allow(dead_code)]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
-    #[allow(dead_code)]
     pub async fn public_addr(&self) -> Option<SocketAddr> {
         self.public_addr.read().await.as_ref().map(|p| p.addr())
     }
 
-    #[allow(dead_code)]
     pub async fn request_public(&self) -> DynResult<()> {
         let mut public_addr_lock = self.public_addr.write().await;
         if public_addr_lock.is_some() {
@@ -145,15 +144,16 @@ impl NetworkManager {
         *public_addr_lock = Some(pubaddr);
         Ok(())
     }
-
-    #[allow(dead_code)]
-    pub async fn add_connection(&self, addr: SocketAddr) -> DynResult<()> {
+    pub async fn connect_to(&self, code: FriendCode) -> DynResult<()> {
+        let addr = code.as_addr();
+        self.add_connection(addr).await
+    }
+    async fn add_connection(&self, addr: SocketAddr) -> DynResult<()> {
         self.connection_addrs.write().await.push(addr.clone());
         self.new_connections_sink.send(addr).await;
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn remote_event_stream(&self) -> impl Stream<Item = DynResult<Message>> {
         let constream_ref = Arc::clone(&self.new_connections_sink);
         let conref = Arc::clone(&self.connection_addrs);
@@ -173,7 +173,6 @@ impl NetworkManager {
         })
     }
 
-    #[allow(dead_code)]
     pub async fn broadcast_event(&self, msg: Message) -> DynResult<()> {
         let mut lock = self.event_sinks.lock().await;
         let res_stream = lock.write_message(msg);
@@ -258,7 +257,6 @@ impl<T: Clone> SpmcSend<T> {
             updator,
         }
     }
-    #[allow(dead_code)]
     pub async fn send(&self, val: T) {
         let mut cb_lock = self.new_callbacks_queue.lock().await;
         let mut new_callbacks = Vec::new();

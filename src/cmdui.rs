@@ -134,8 +134,7 @@ pub async fn run() -> crate::DynResult<()> {
                 return Err("".into());
             }
         };
-        let stream = crate::network::utils::connect_to(addr).await?;
-        network_manager.add_connection(stream).await?;
+        network_manager.connect_to(addr).await?;
     }
     if args.is_present("public") {
         println!("Trying to open public IP.");

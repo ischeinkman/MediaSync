@@ -1,4 +1,5 @@
-use crate::network::utils::tcp::{PublicAddr, random_listener};
+use crate::network::friendcodes::FriendCode;
+use crate::network::utils::{random_localaddr, PublicAddr};
 use crate::protocols::Message;
 use crate::DynResult;
 
@@ -52,12 +53,12 @@ pub struct NetworkManager {
 
 #[allow(dead_code)]
 impl NetworkManager {
-    #[allow(dead_code)]
-    pub async fn new_random_port(min_port : u16, max_port : u16) -> DynResult<Self> {
-        let listener = random_listener(min_port, max_port).await?;
+    pub async fn new_random_port(min_port: u16, max_port: u16) -> DynResult<Self> {
+        let addr = random_localaddr(min_port, max_port).await.unwrap();
+        let listener = TcpListener::bind(addr).await.unwrap();
         Self::new(listener)
     }
-    pub fn new(listener: TcpListener) -> DynResult<Self> {
+    fn new(listener: TcpListener) -> DynResult<Self> {
         let local_addr = listener.local_addr().unwrap();
         let public_addr = RwLock::new(None);
         let (address_sink, _) = broadcast::channel(5);
@@ -103,7 +104,13 @@ impl NetworkManager {
         Ok(())
     }
 
-    pub async fn add_connection(&self, con: TcpStream) -> DynResult<()> {
+    pub async fn connect_to(&self, code: FriendCode) -> DynResult<()> {
+        let addr = code.as_addr();
+        let con = TcpStream::connect(addr).await?;
+        self.add_connection(con).await
+    }
+
+    async fn add_connection(&self, con: TcpStream) -> DynResult<()> {
         con.set_nodelay(true)?;
         let addr = con.local_addr()?;
         let (read, write) = tokio::io::split(con);

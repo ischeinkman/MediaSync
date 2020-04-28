@@ -104,11 +104,7 @@ async fn on_add_connection<T>(
         }
     };
     log::info!("Adding connection: {}", parsed.as_addr());
-    let connection = match crate::network::utils::connect_to(parsed).await {
-        Ok(c) => c,
-        Err(_e) => todo!(),
-    };
-    network_ref.add_connection(connection).await.unwrap();
+    network_ref.connect_to(parsed).await.unwrap();
 }
 
 pub struct JsArgs {
