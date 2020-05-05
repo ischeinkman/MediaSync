@@ -39,37 +39,6 @@ pub enum Command {
     AddConnection { code: String },
 }
 
-async fn webview_update_task<'a, T>(view: web_view::WebView<'a, T>) {
-    const FPS: u64 = 1000;
-    const NANOS_PER_SECOND: u64 = 1_000_000_000;
-    const NANOS_PER_FRAME: u64 = NANOS_PER_SECOND / FPS;
-    let throttle_time = Duration::from_nanos(NANOS_PER_FRAME);
-    println!("Time per frame: {}", throttle_time.as_secs_f64());
-    let step_loop = futures::stream::unfold(view, |mut webview| {
-        let res = webview.step();
-        let res = match res {
-            Some(Ok(_)) => Some(((), webview)),
-            Some(e) => Some((e.unwrap(), webview)),
-            None => None,
-        };
-        async { res }
-    });
-    if tokio::runtime::Handle::try_current().is_ok() {
-        let throttled = tokio::time::throttle(throttle_time, step_loop);
-        throttled
-            .map(Ok)
-            .forward(futures::sink::drain())
-            .await
-            .unwrap();
-    } else {
-        step_loop
-            .for_each(|_| {
-                std::thread::sleep(throttle_time);
-                async {}
-            })
-            .await;
-    }
-}
 
 async fn update_local_info<T>(network_ref: &Arc<NetworkManager>, handle: web_view::Handle<T>) {
     let local_addr = network_ref.local_addr();
@@ -146,6 +115,7 @@ fn setup_logger(handle: &web_view::Handle<WebuiState>) {
     let log_handle = LogSinkWrapper::get_handle();
     log::info!("Setting logger.");
     log_handle.add_logger(WebLogSink::new(href), LogSinkConfig::new().enable_all());
+    log_handle.add_logger(crate::logging::StdoutLogSink::new(), LogSinkConfig::new().enable_all().with_nonlocal(true));
     log::info!("Logger set.");
 }
 
@@ -276,7 +246,6 @@ fn invoke_handler(
 }
 
 async fn build_webview(network_manager: &Arc<NetworkManager>) -> web_view::Handle<WebuiState> {
-    let (mut hsnd, mut hrecv) = watch::channel(None);
     let network_ref = Arc::clone(&network_manager);
     let retfut = move || {
         let mut webview: WebView<'static, _> = web_view::builder()
@@ -288,30 +257,10 @@ async fn build_webview(network_manager: &Arc<NetworkManager>) -> web_view::Handl
             .build()
             .unwrap();
         webview.step();
-        if hsnd.broadcast(Some(webview.handle())).is_err() {
-            log::warn!("ERROR SENDING HANDLE!");
-        } else {
-            log::info!("Handle sending.");
-        }
-        let mfut = async move {
-            hsnd.closed().await;
-            log::info!("Yielding.");
-            tokio::task::yield_now().await;
-            log::info!("Yielt.");
-            let ui_task = webview_update_task(webview);
-            log::info!("Made ui_task");
-            ui_task.await;
-        };
-        mfut
+        async {webview}
     };
 
-    tokio::task::spawn_blocking(|| {
-        futures::executor::block_on(retfut());
-    });
-
-    loop {
-        if let Some(Some(h)) = hrecv.recv().await {
-            break h;
-        }
-    }
+    crate::webview_helper::generate_webview(
+        retfut
+    ).await
 }

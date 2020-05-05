@@ -10,6 +10,7 @@ mod traits;
 mod logging;
 mod cmdui;
 mod webui;
+mod webview_helper;
 use network::NetworkManager;
 use protocols::{Message, TimeStamp};
 use traits::sync::{SyncPlayer, SyncPlayerWrapper};

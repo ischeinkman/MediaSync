@@ -50,6 +50,10 @@ impl LogSinkConfig {
         self.filter = Some(filter);
         self
     }
+    pub fn with_nonlocal(mut self, nonlocal: bool) -> Self {
+        self.only_local = !nonlocal;
+        self
+    }
     pub fn matches_level(&self, meta: &Metadata) -> bool {
         if !self.is_enabled() {
             return false;
@@ -64,7 +68,10 @@ impl LogSinkConfig {
             .module_path()
             .map(|pt| pt.contains("vlcsync"))
             .unwrap_or(true);
-        matches_level && matches_source
+        let log_all = !self.only_local;
+        let source_flag = log_all || matches_source;
+        let retvl = matches_level && source_flag;
+        retvl
     }
 }
 
