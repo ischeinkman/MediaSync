@@ -89,7 +89,7 @@ async fn local_broadcast_task(
                 let network_ref = Arc::clone(&network_manager);
                 async move {
                     let mut player_lock = player_ref.lock().await;
-                    let player_state = match player_lock.get_sync_status() {
+                    let player_state = match player_lock.get_sync_status().await {
                         Ok(v) => v,
                         Err(e) => {
                             return Err(e);
@@ -125,7 +125,7 @@ async fn remote_sink_task(
                 let outpt = match evt {
                     Message::Sync(msg) => player_lock.push_sync_status(msg),
                 };
-                match outpt {
+                match outpt.await {
                     Ok(true) => {
                         network_ref.broadcast_event(evt).await?;
                         tokio::task::yield_now().await;

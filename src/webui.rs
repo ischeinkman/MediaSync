@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JSValue;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::broadcast;
-use tokio::sync::watch;
 use tokio::sync::Mutex;
 use web_view::WebView;
 use crate::logging::{WebLogSink, LogSinkWrapper, LogSinkConfig};
@@ -194,7 +192,7 @@ pub async fn run() -> crate::DynResult<()> {
     let sync_task_generator = move || async move {
         let player = {
             let raw_player = select_player(&handle).await;
-            let wrapped_player = SyncPlayerWrapper::new(raw_player, SyncConfig::new()).unwrap();
+            let wrapped_player = SyncPlayerWrapper::new(raw_player, SyncConfig::new()).await.unwrap();
             Arc::new(Mutex::new(wrapped_player))
         };
         println!("Selected player. Now updating local info.");

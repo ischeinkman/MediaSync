@@ -1,3 +1,4 @@
+use futures::future::{self, FutureExt, LocalBoxFuture};
 use futures::stream::TryStreamExt;
 use hyper::body::{self, Buf};
 use hyper::client::{Client, HttpConnector};
@@ -53,8 +54,7 @@ impl HttpConfig {
             use std::fmt::Write;
             retvl.push_str("localhost");
             write!(&mut retvl, ":{}", self.bind_addr.port()).unwrap();
-        }
-        else {
+        } else {
             retvl.extend(self.bind_addr.to_string().chars());
         }
         retvl.push_str("/requests/status.json");
@@ -270,40 +270,40 @@ impl VlcHttpPlayer {
 }
 
 impl SyncPlayer for VlcHttpPlayer {
-    fn get_pos(&self) -> DynResult<PlayerPosition> {
+    fn get_pos(&self) -> LocalBoxFuture<'_, DynResult<PlayerPosition>> {
         let now = std::time::Instant::now();
         if let Some((prev_time, prev_pos, _)) = self.results_cache.get() {
             let dt = now.duration_since(prev_time);
             if dt <= std::time::Duration::from_millis(10) {
-                return Ok(prev_pos);
+                return future::ready(Ok(prev_pos)).boxed_local();
             }
         }
-        let fut = async {
+        let fut = async move {
             let (pos, state) = self.do_http_request(None).await?;
             let now = std::time::Instant::now();
             self.results_cache.set(Some((now, pos, state)));
             Ok(pos)
         };
-        crate::utils::block_on(fut)
+        fut.boxed_local()
     }
-    fn get_state(&self) -> DynResult<PlayerState> {
+    fn get_state(&self) -> LocalBoxFuture<'_, DynResult<PlayerState>> {
         let now = std::time::Instant::now();
         if let Some((prev_time, _, prev_state)) = self.results_cache.get() {
             let dt = now.duration_since(prev_time);
             if dt <= std::time::Duration::from_millis(10) {
-                return Ok(prev_state);
+                return future::ready(Ok(prev_state)).boxed_local();
             }
         }
-        let fut = async {
+        let fut = async move {
             let (pos, state) = self.do_http_request(None).await.unwrap();
             let now = std::time::Instant::now();
             self.results_cache.set(Some((now, pos, state)));
             Ok(state)
         };
-        crate::utils::block_on(fut)
+        fut.boxed_local()
     }
-    fn set_pos(&mut self, state: PlayerPosition) -> DynResult<()> {
-        let fut = async {
+    fn set_pos(&mut self, state: PlayerPosition) -> LocalBoxFuture<'_, DynResult<()>> {
+        let fut = async move {
             let command = self.length_estimator.get().estimate_seek(state);
             let (pos, state) = self
                 .do_http_request(Some(HttpCommand::Seek(command)))
@@ -312,10 +312,10 @@ impl SyncPlayer for VlcHttpPlayer {
             self.results_cache.set(Some((now, pos, state)));
             Ok(())
         };
-        crate::utils::block_on(fut)
+        fut.boxed_local()
     }
-    fn set_state(&mut self, state: PlayerState) -> DynResult<()> {
-        let fut = async {
+    fn set_state(&mut self, state: PlayerState) -> LocalBoxFuture<'_, DynResult<()>> {
+        let fut = async move {
             let command = Some(HttpCommand::SetState(state));
             let mut nxt = self.do_http_request(command).await.unwrap();
             if nxt.1 != state {
@@ -325,7 +325,7 @@ impl SyncPlayer for VlcHttpPlayer {
             self.results_cache.set(Some((now, nxt.0, nxt.1)));
             Ok(())
         };
-        crate::utils::block_on(fut)
+        fut.boxed_local()
     }
 }
 

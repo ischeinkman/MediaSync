@@ -3,6 +3,10 @@ pub mod sync {
     use crate::protocols::{TimeDelta, TimeStamp, UserId};
     use crate::utils::AbsSub;
     use crate::DynResult;
+    use futures::future::FutureExt;
+    use futures::future::LocalBoxFuture;
+    use std::collections::HashMap;
+
     #[derive(Clone, Eq, PartialEq, Debug)]
     pub struct SyncConfig {
         pub id: UserId,
@@ -36,15 +40,15 @@ pub mod sync {
         player: T,
         config: SyncConfig,
         previous_status: SyncMessage,
-        previous_event_times: std::collections::HashMap<UserId, TimeStamp>,
+        previous_event_times: HashMap<UserId, TimeStamp>,
         last_state_push_time: TimeStamp,
         last_jump_time: TimeStamp,
     }
 
     impl<T: SyncPlayer> SyncPlayerWrapper<T> {
-        pub fn new(player: T, config: SyncConfig) -> DynResult<Self> {
-            let cur_state = player.get_state().unwrap();
-            let cur_pos = player.get_pos().unwrap();
+        pub async fn new(player: T, config: SyncConfig) -> DynResult<Self> {
+            let cur_state = player.get_state().await.unwrap();
+            let cur_pos = player.get_pos().await.unwrap();
             let cur_time = TimeStamp::now();
             let mut previous_status = SyncMessage::zero();
             previous_status.set_source_id(config.id);
@@ -53,7 +57,7 @@ pub mod sync {
             previous_status.set_position(cur_pos);
             previous_status.set_jumped(false);
             previous_status.set_changed_state(false);
-            let previous_event_times = std::collections::HashMap::new();
+            let previous_event_times = HashMap::new();
             Ok(Self {
                 player,
                 config,
@@ -74,7 +78,10 @@ pub mod sync {
                 .unwrap_or(true)
         }
 
-        fn process_state_change(&self, message: SyncMessage) -> DynResult<Option<PlayerState>> {
+        async fn process_state_change(
+            &self,
+            message: SyncMessage,
+        ) -> DynResult<Option<PlayerState>> {
             // Only push if we actually need to
             if self.previous_status.state() == message.state() {
                 return Ok(None);
@@ -93,7 +100,7 @@ pub mod sync {
 
             // If the local player got pushed between messages, just wait
             // for the local event to get broadcast and ignore the desynch.
-            let current_state = self.player.get_state().unwrap();
+            let current_state = self.player.get_state().await.unwrap();
             if current_state != self.previous_status.state() {
                 log::warn!("Player changed state mid push.");
                 return Ok(None);
@@ -109,7 +116,7 @@ pub mod sync {
             Ok(Some(nstate))
         }
 
-        fn process_pos_change(
+        async fn process_pos_change(
             &self,
             message: SyncMessage,
         ) -> DynResult<Option<(PlayerPosition, bool)>> {
@@ -137,7 +144,7 @@ pub mod sync {
             }
 
             // 4: Get the local player's actual position, in case of deviation from the expected.
-            let player_pos = self.player.get_pos().unwrap();
+            let player_pos = self.player.get_pos().await.unwrap();
             let different_mag = player_pos.abs_sub(current_pos);
             let jumped_back = self.config.jump_if_backwards && player_pos < current_pos;
 
@@ -177,7 +184,10 @@ pub mod sync {
             let npos = expected_pos + TimeDelta::from_millis(offset_millis);
             Ok(Some((npos, true)))
         }
-        pub fn push_sync_status(&mut self, message: SyncMessage) -> DynResult<ShouldRebroadcast> {
+        pub async fn push_sync_status(
+            &mut self,
+            message: SyncMessage,
+        ) -> DynResult<ShouldRebroadcast> {
             // Verify that we need to process the message at all
             if !self.should_process(message) {
                 return Ok(false);
@@ -186,19 +196,19 @@ pub mod sync {
             let mut next_status = self.previous_status;
 
             // Update playpause state
-            if let Some(nxt) = self.process_state_change(message)? {
+            if let Some(nxt) = self.process_state_change(message).await? {
                 next_status.set_created(TimeStamp::now());
                 next_status.set_state(nxt);
-                self.player.set_state(nxt).unwrap();
+                self.player.set_state(nxt).await.unwrap();
                 self.last_state_push_time = message.created();
             }
 
             // Update player position
-            if let Some((npos, should_push)) = self.process_pos_change(message)? {
+            if let Some((npos, should_push)) = self.process_pos_change(message).await? {
                 next_status.set_created(TimeStamp::now());
                 next_status.set_position(npos);
                 if should_push {
-                    self.player.set_pos(npos).unwrap();
+                    self.player.set_pos(npos).await.unwrap();
                     self.last_jump_time = message.created();
                 }
             }
@@ -209,19 +219,19 @@ pub mod sync {
             self.previous_status = next_status;
             Ok(true)
         }
-        fn inner_status(&self) -> DynResult<SyncMessage> {
+        async fn inner_status(&self) -> DynResult<SyncMessage> {
             let prev_status = self.previous_status;
             let mut retvl = SyncMessage::zero();
             let now = TimeStamp::now();
             retvl.set_created(now);
             retvl.set_source_id(self.config.id);
 
-            let cur_play_state = self.player.get_state()?;
+            let cur_play_state = self.player.get_state().await?;
             let changed_status = cur_play_state != prev_status.state();
             retvl.set_state(cur_play_state);
             retvl.set_changed_state(changed_status);
 
-            let cur_pos = self.player.get_pos()?;
+            let cur_pos = self.player.get_pos().await?;
             let expected_pos = prev_status.projected_to_time(now).position();
             let err = cur_pos.abs_sub(expected_pos);
             let jump_back = self.config.jump_if_backwards && cur_pos < expected_pos;
@@ -230,8 +240,8 @@ pub mod sync {
             retvl.set_position(cur_pos);
             Ok(retvl)
         }
-        pub fn get_sync_status(&mut self) -> DynResult<SyncMessage> {
-            let next_status = self.inner_status()?;
+        pub async fn get_sync_status(&mut self) -> DynResult<SyncMessage> {
+            let next_status = self.inner_status().await?;
             self.previous_status = next_status;
             if next_status.changed_state() || next_status.jumped() {
                 log::info!(
@@ -254,24 +264,24 @@ pub mod sync {
     pub type ShouldRebroadcast = bool;
 
     pub trait SyncPlayer {
-        fn get_state(&self) -> DynResult<PlayerState>;
-        fn set_state(&mut self, state: PlayerState) -> DynResult<()>;
-        fn get_pos(&self) -> DynResult<PlayerPosition>;
-        fn set_pos(&mut self, state: PlayerPosition) -> DynResult<()>;
+        fn get_state<'a>(&'a self) -> LocalBoxFuture<'a, DynResult<PlayerState>>;
+        fn set_state<'a>(&'a mut self, state: PlayerState) -> LocalBoxFuture<'a, DynResult<()>>;
+        fn get_pos<'a>(&'a self) -> LocalBoxFuture<'a, DynResult<PlayerPosition>>;
+        fn set_pos<'a>(&'a mut self, state: PlayerPosition) -> LocalBoxFuture<'a, DynResult<()>>;
     }
 
     impl<'a> SyncPlayer for Box<dyn SyncPlayer + 'a> {
-        fn get_state(&self) -> DynResult<PlayerState> {
-            self.as_ref().get_state()
+        fn get_state(&self) -> LocalBoxFuture<'_, DynResult<PlayerState>> {
+            async move { self.as_ref().get_state().await }.boxed_local()
         }
-        fn set_state(&mut self, state: PlayerState) -> DynResult<()> {
-            self.as_mut().set_state(state)
+        fn set_state(&mut self, state: PlayerState) -> LocalBoxFuture<'_, DynResult<()>> {
+            async move { self.as_mut().set_state(state).await }.boxed_local()
         }
-        fn get_pos(&self) -> DynResult<PlayerPosition> {
-            self.as_ref().get_pos()
+        fn get_pos(&self) -> LocalBoxFuture<'_, DynResult<PlayerPosition>> {
+            async move { self.as_ref().get_pos().await }.boxed_local()
         }
-        fn set_pos(&mut self, state: PlayerPosition) -> DynResult<()> {
-            self.as_mut().set_pos(state)
+        fn set_pos(&mut self, state: PlayerPosition) -> LocalBoxFuture<'_, DynResult<()>> {
+            async move { self.as_mut().set_pos(state).await }.boxed_local()
         }
     }
 

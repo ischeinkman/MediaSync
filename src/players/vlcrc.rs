@@ -3,6 +3,8 @@ use crate::protocols::TimeStamp;
 use crate::traits::sync::{SyncPlayer, SyncPlayerList};
 use crate::utils::AbsSub;
 use crate::DynResult;
+use futures::future::FutureExt;
+use futures::future::LocalBoxFuture;
 use std::process::{Child, Command};
 
 use std::cell::{Cell, RefCell};
@@ -87,53 +89,65 @@ impl VlcRcPlayer {
 }
 
 impl SyncPlayer for VlcRcPlayer {
-    fn get_pos(&self) -> DynResult<PlayerPosition> {
-        let raw_time = self.run_command("get_time").unwrap();
-        let trimmed_secs = raw_time.trim();
-        let returned_pos = if trimmed_secs.is_empty() {
-            PlayerPosition::from_millis(0)
-        } else {
-            let parsed: u64 = trimmed_secs.parse().unwrap();
-            PlayerPosition::from_millis(parsed * 1000)
+    fn get_pos(&self) -> LocalBoxFuture<'_, DynResult<PlayerPosition>> {
+        let fut = async move {
+            let raw_time = self.run_command("get_time").unwrap();
+            let trimmed_secs = raw_time.trim();
+            let returned_pos = if trimmed_secs.is_empty() {
+                PlayerPosition::from_millis(0)
+            } else {
+                let parsed: u64 = trimmed_secs.parse().unwrap();
+                PlayerPosition::from_millis(parsed * 1000)
+            };
+            let previous_pos = self.previous_pos.get();
+            let previous_pos_query = self.previous_pos_query.get();
+            let now = TimeStamp::now();
+            if returned_pos == previous_pos
+                && self.get_state().await.unwrap() == PlayerState::Playing
+            {
+                let dt = now.abs_sub(previous_pos_query);
+                let retvl = returned_pos + dt;
+                Ok(retvl)
+            } else {
+                self.previous_pos.set(returned_pos);
+                self.previous_pos_query.set(now);
+                Ok(returned_pos)
+            }
         };
-        let previous_pos = self.previous_pos.get();
-        let previous_pos_query = self.previous_pos_query.get();
-        let now = TimeStamp::now();
-        if returned_pos == previous_pos && self.get_state().unwrap() == PlayerState::Playing {
-            let dt = now.abs_sub(previous_pos_query);
-            let retvl = returned_pos + dt;
-            Ok(retvl)
-        } else {
-            self.previous_pos.set(returned_pos);
-            self.previous_pos_query.set(now);
-            Ok(returned_pos)
-        }
+        fut.boxed_local()
     }
-    fn get_state(&self) -> DynResult<PlayerState> {
-        let raw_state = self.run_command("status").unwrap();
-        let trimmed_state = raw_state.trim();
-        if trimmed_state.contains("playing") {
-            Ok(PlayerState::Playing)
-        } else if trimmed_state.contains("paused") || trimmed_state.contains("stopped") {
-            Ok(PlayerState::Paused)
-        } else {
-            Err(format!(
-                "Error: vlc rc interface gave invalid is_playing result of {}",
-                trimmed_state
-            )
-            .into())
-        }
+    fn get_state<'a>(&'a self) -> LocalBoxFuture<'a, DynResult<PlayerState>> {
+        let fut = async move {
+            let raw_state = self.run_command("status").unwrap();
+            let trimmed_state = raw_state.trim();
+            if trimmed_state.contains("playing") {
+                Ok(PlayerState::Playing)
+            } else if trimmed_state.contains("paused") || trimmed_state.contains("stopped") {
+                Ok(PlayerState::Paused)
+            } else {
+                Err(format!(
+                    "Error: vlc rc interface gave invalid is_playing result of {}",
+                    trimmed_state
+                )
+                .into())
+            }
+        };
+        fut.boxed_local()
     }
-    fn set_pos(&mut self, state: PlayerPosition) -> DynResult<()> {
-        let seconds = state.as_millis() / 1000 + if state.as_millis() % 1000 > 500 { 1 } else { 0 };
-        let current = self.get_pos()?.as_millis() / 1000;
-        if current.abs_sub(seconds) > 1 {
-            self.run_command_mut(format!("seek {}", seconds).as_ref())
-                .unwrap();
-        }
-        Ok(())
+    fn set_pos(&mut self, state: PlayerPosition) -> LocalBoxFuture<'_, DynResult<()>> {
+        let fut = async move {
+            let seconds =
+                state.as_millis() / 1000 + if state.as_millis() % 1000 > 500 { 1 } else { 0 };
+            let current = self.get_pos().await?.as_millis() / 1000;
+            if current.abs_sub(seconds) > 1 {
+                self.run_command_mut(format!("seek {}", seconds).as_ref())
+                    .unwrap();
+            }
+            Ok(())
+        };
+        fut.boxed_local()
     }
-    fn set_state(&mut self, state: PlayerState) -> DynResult<()> {
+    fn set_state<'a>(&'a mut self, state: PlayerState) -> LocalBoxFuture<'a, DynResult<()>> {
         match state {
             PlayerState::Playing => {
                 self.run_command_mut("play").unwrap();
@@ -146,7 +160,7 @@ impl SyncPlayer for VlcRcPlayer {
             }
         };
 
-        Ok(())
+        futures::future::ready(Ok(())).boxed_local()
     }
 }
 

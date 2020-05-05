@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::logging::{LogSinkConfig, LogSinkWrapper, StderrLogSink, StdoutLogSink};
 
-fn simpleui_select_player<'a>(
+async fn simpleui_select_player<'a>(
     options_vec: &mut Vec<(String, Box<dyn SyncPlayer + 'a>)>,
 ) -> std::io::Result<(String, SyncPlayerWrapper<Box<dyn SyncPlayer + 'a>>)> {
     let retvl = loop {
@@ -29,7 +29,7 @@ fn simpleui_select_player<'a>(
         let config = SyncConfig::new();
         match parse_res {
             Ok(Some((name, player))) => {
-                break (name, SyncPlayerWrapper::new(player, config).unwrap());
+                break (name, SyncPlayerWrapper::new(player, config).await.unwrap());
             }
             Ok(None) => {
                 println!("Selection {} does not exist. Please try again.", raw_input);
@@ -115,7 +115,7 @@ pub async fn run() -> crate::DynResult<()> {
     for (idx, (name, _)) in player_list.iter().enumerate() {
         println!("  [{:0digits$}]: {}", idx, name, digits = digits);
     }
-    let (name, player) = simpleui_select_player(&mut player_list)?;
+    let (name, player) = simpleui_select_player(&mut player_list).await?;
     println!("Now connecting to player {}", name);
     println!("Connection successful!");
 
