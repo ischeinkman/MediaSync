@@ -282,6 +282,19 @@ mod chrome_process {
 
     use headless_chrome::browser::default_executable;
 
+    
+    #[cfg(target_os="windows")]
+    fn data_dir() -> String {
+        const DEFAULT_DATA_DIR : &str = "--user-data-dir=%userprofile%\\AppData\\Local\\VlcSync\\chrome_data_dir";
+        DEFAULT_DATA_DIR.to_owned()
+    }
+
+    #[cfg(target_family="unix")]
+    fn data_dir() -> String {
+        let home = std::env::var("HOME").unwrap();
+        let flag = format!("--user-data-dir={}/.config/vlcsync/chrome_data_dir", home);
+        flag
+    } 
     pub struct Process {
         child_process: Child,
         pub debug_ws_url: String,
@@ -294,7 +307,7 @@ mod chrome_process {
         }
     }
 
-    static DEFAULT_ARGS: &[&str] = &[
+    const DEFAULT_ARGS: &[&str] = &[
         "--enable-features=NetworkService,NetworkServiceInProcess",
         "--metrics-recording-only",
         "--no-first-run",
@@ -326,6 +339,8 @@ mod chrome_process {
 
             let mut args = DEFAULT_ARGS.to_vec();
             args.push(port_option.as_str());
+            let data_dir = data_dir();
+            args.push(data_dir.as_str());
 
             let path = default_executable().map_err(|e| format!("{}", e))?;
 
