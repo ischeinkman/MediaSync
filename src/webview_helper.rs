@@ -1,4 +1,4 @@
-use futures::future::{FutureExt, LocalBoxFuture};
+
 use futures::stream::SelectAll;
 use futures::stream::{LocalBoxStream, StreamExt};
 use std::future::Future;
@@ -15,6 +15,7 @@ enum WebviewThreadHandle {
 
 struct WebviewGlobalContext {
     ctx_handle: mpsc::UnboundedSender<TaskGenerator>,
+    #[allow(unused)]
     loop_handle: WebviewThreadHandle,
 }
 

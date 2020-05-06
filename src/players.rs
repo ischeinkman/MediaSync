@@ -1,17 +1,18 @@
-mod vlcrc;
 mod vlchttp;
+mod vlcrc;
+mod netflix_chrome;
 use super::DynResult;
 
-#[cfg(all(feature="mprisplayer", target_family="unix"))]
+#[cfg(all(feature = "mprisplayer", target_family = "unix"))]
 mod mpris_player;
 
-#[cfg(not(all(feature="mprisplayer", target_family="unix")))]
+#[cfg(not(all(feature = "mprisplayer", target_family = "unix")))]
 mod mpris_player {
-    use super::{SyncPlayerList, DynResult, SyncPlayer};
+    use super::{DynResult, SyncPlayer, SyncPlayerList};
     pub struct MprisPlayerList {}
     impl SyncPlayerList for MprisPlayerList {
         fn new() -> DynResult<Self> {
-            Ok(Self{})
+            Ok(Self {})
         }
         fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer>)>> {
             Ok(vec![])
@@ -24,8 +25,9 @@ use super::traits::sync::{SyncPlayer, SyncPlayerList};
 
 pub struct BulkSyncPlayerList {
     mpris: MprisPlayerList,
-    vlcrc : vlcrc::VlcRcList, 
-    vlchttp : vlchttp::VlcHttpList,
+    vlcrc: vlcrc::VlcRcList,
+    vlchttp: vlchttp::VlcHttpList,
+    netflix_chrome : netflix_chrome::NetflixPlayerList, 
 }
 
 impl SyncPlayerList for BulkSyncPlayerList {
@@ -33,7 +35,13 @@ impl SyncPlayerList for BulkSyncPlayerList {
         let mpris = MprisPlayerList::new()?;
         let vlcrc = vlcrc::VlcRcList::new()?;
         let vlchttp = vlchttp::VlcHttpList::new()?;
-        Ok(Self { mpris, vlcrc, vlchttp })
+        let netflix_chrome = netflix_chrome::NetflixPlayerList::new()?;
+        Ok(Self {
+            mpris,
+            vlcrc,
+            vlchttp,
+            netflix_chrome,
+        })
     }
     fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer>)>> {
         let mut retvl = Vec::new();
@@ -43,9 +51,12 @@ impl SyncPlayerList for BulkSyncPlayerList {
 
         let mut vlcrc_players = self.vlcrc.get_players()?;
         retvl.append(&mut vlcrc_players);
-        
+
         let mut vlchttp_players = self.vlchttp.get_players()?;
         retvl.append(&mut vlchttp_players);
+
+        let mut netflix_chrome_players = self.netflix_chrome.get_players()?;
+        retvl.append(&mut netflix_chrome_players);
 
         Ok(retvl)
     }

@@ -16,7 +16,7 @@ pub async fn local_network_ip() -> Result<IpAddr, std::io::Error> {
     Ok(got_addr.ip())
 }
 
-fn random_port(from: u16, to: u16) -> u16 {
+pub fn random_port(from: u16, to: u16) -> u16 {
     let valid_range = to - from;
     let info: u16 = rand::random();
     let offset = info % valid_range;
