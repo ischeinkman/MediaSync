@@ -22,6 +22,7 @@ base64 = "0.12"
 lazy_static = "1.4"
 stun_codec = "0.1"
 bytecodec = "0.4"
+headless_chrome = "0.9"
 
 [features]
 default = ["mprisplayer"]
