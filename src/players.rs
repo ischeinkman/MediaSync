@@ -1,33 +1,22 @@
+use crate::traits::sync::{SyncPlayer, SyncPlayerList};
+use crate::DynResult;
+
 #[cfg(feature = "vlchttp")]
 mod vlchttp;
+
+#[cfg(feature = "vlcrc")]
 mod vlcrc;
 
 #[cfg(feature = "netflix")]
 mod netflix_chrome;
-use super::DynResult;
 
 #[cfg(all(feature = "mprisplayer", target_family = "unix"))]
 mod mpris_player;
 
-#[cfg(not(all(feature = "mprisplayer", target_family = "unix")))]
-mod mpris_player {
-    use super::{DynResult, SyncPlayer, SyncPlayerList};
-    pub struct MprisPlayerList {}
-    impl SyncPlayerList for MprisPlayerList {
-        fn new() -> DynResult<Self> {
-            Ok(Self {})
-        }
-        fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer>)>> {
-            Ok(vec![])
-        }
-    }
-}
-use mpris_player::MprisPlayerList;
-
-use super::traits::sync::{SyncPlayer, SyncPlayerList};
-
 pub struct BulkSyncPlayerList {
-    mpris: MprisPlayerList,
+    #[cfg(all(feature = "mprisplayer", target_family = "unix"))]
+    mpris: mpris_player::MprisPlayerList,
+    #[cfg(feature = "vlcrc")]
     vlcrc: vlcrc::VlcRcList,
     #[cfg(feature = "vlchttp")]
     vlchttp: vlchttp::VlcHttpList,
@@ -37,14 +26,18 @@ pub struct BulkSyncPlayerList {
 
 impl SyncPlayerList for BulkSyncPlayerList {
     fn new() -> DynResult<Self> {
-        let mpris = MprisPlayerList::new()?;
+        #[cfg(all(feature = "mprisplayer", target_family = "unix"))]
+        let mpris = mpris_player::MprisPlayerList::new()?;
+        #[cfg(feature = "vlcrc")]
         let vlcrc = vlcrc::VlcRcList::new()?;
         #[cfg(feature = "vlchttp")]
         let vlchttp = vlchttp::VlcHttpList::new()?;
         #[cfg(feature = "netflix")]
         let netflix_chrome = netflix_chrome::NetflixPlayerList::new()?;
         Ok(Self {
+            #[cfg(all(feature = "mprisplayer", target_family = "unix"))]
             mpris,
+            #[cfg(feature = "vlcrc")]
             vlcrc,
             #[cfg(feature = "vlchttp")]
             vlchttp,
@@ -55,11 +48,17 @@ impl SyncPlayerList for BulkSyncPlayerList {
     fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer>)>> {
         let mut retvl = Vec::new();
 
-        let mut mpris_players = self.mpris.get_players()?;
-        retvl.append(&mut mpris_players);
+        #[cfg(all(feature = "mprisplayer", target_family = "unix"))]
+        {
+            let mut mpris_players = self.mpris.get_players()?;
+            retvl.append(&mut mpris_players);
+        }
 
-        let mut vlcrc_players = self.vlcrc.get_players()?;
-        retvl.append(&mut vlcrc_players);
+        #[cfg(feature = "vlcrc")]
+        {
+            let mut vlcrc_players = self.vlcrc.get_players()?;
+            retvl.append(&mut vlcrc_players);
+        }
 
         #[cfg(feature = "vlchttp")]
         {

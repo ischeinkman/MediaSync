@@ -24,6 +24,7 @@ headless_chrome = {version = "0.9", optional = true}
 
 [features]
 default = []
+vlcrc = []
 mprisplayer = ["mpris"]
 netflix = ["headless_chrome"]
 vlchttp = ["hyper", "serde", "serde_json", "base64"]
