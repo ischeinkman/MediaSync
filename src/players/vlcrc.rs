@@ -1,6 +1,6 @@
 use crate::messages::TimeStamp;
 use crate::messages::{PlayerPosition, PlayerState};
-use crate::traits::sync::{SyncPlayer, SyncPlayerList};
+use crate::traits::{SyncPlayer, SyncPlayerList};
 use crate::utils::AbsSub;
 use crate::DynResult;
 use futures::future::FutureExt;

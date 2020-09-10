@@ -1,5 +1,5 @@
 use crate::messages::{PlayerPosition, PlayerState};
-use crate::traits::sync::{SyncPlayer, SyncPlayerList};
+use crate::traits::{SyncPlayer, SyncPlayerList};
 use crate::DynResult;
 
 use futures::stream::{FuturesUnordered, StreamExt};

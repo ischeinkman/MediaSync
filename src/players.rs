@@ -1,4 +1,4 @@
-use crate::traits::sync::{SyncPlayer, SyncPlayerList};
+use crate::traits::{SyncPlayer, SyncPlayerList};
 use crate::DynResult;
 
 #[cfg(feature = "vlchttp")]

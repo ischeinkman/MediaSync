@@ -2,7 +2,7 @@ use crate::logging::{LogSinkConfig, LogSinkWrapper, WebLogSink};
 use crate::network::friendcodes::FriendCode;
 use crate::network::NetworkManager;
 use crate::players::BulkSyncPlayerList;
-use crate::traits::sync::{SyncConfig, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
+use crate::traits::{SyncConfig, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JSValue;

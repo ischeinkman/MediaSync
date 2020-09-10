@@ -1,6 +1,6 @@
 use crate::network::{friendcodes::FriendCode, friendcodes::FriendCodeError, NetworkManager};
 use crate::players::BulkSyncPlayerList;
-use crate::traits::sync::{SyncConfig, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
+use crate::traits::{SyncConfig, SyncPlayer, SyncPlayerList, SyncPlayerWrapper};
 use crate::{local_broadcast_task, remote_sink_task};
 use clap::{App, Arg};
 use futures::StreamExt;

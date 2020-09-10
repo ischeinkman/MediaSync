@@ -1,5 +1,5 @@
 use crate::messages::{PlayerPosition, PlayerState};
-use crate::traits::sync::{SyncPlayer, SyncPlayerList};
+use crate::traits::{SyncPlayer, SyncPlayerList};
 use crate::DynResult;
 use futures::future::{FutureExt, LocalBoxFuture};
 use std::time::Duration;
@@ -40,7 +40,7 @@ impl<'a> SyncPlayer for MprisPlayer<'a> {
         };
         fut.boxed_local()
     }
-    fn get_pos(&self) -> LocalBoxFuture<'_,  DynResult<PlayerPosition>> {
+    fn get_pos(&self) -> LocalBoxFuture<'_, DynResult<PlayerPosition>> {
         let retvl = self
             .player
             .get_position()
@@ -49,18 +49,18 @@ impl<'a> SyncPlayer for MprisPlayer<'a> {
             .map_err(wrap_dbus_error);
         futures::future::ready(retvl).boxed_local()
     }
-    fn set_pos(&mut self, state: PlayerPosition) ->LocalBoxFuture<'_,  DynResult<()> >{
+    fn set_pos(&mut self, state: PlayerPosition) -> LocalBoxFuture<'_, DynResult<()>> {
         let fut = async move {
-        let track_id = self
-            .player
-            .get_metadata()
-            .map_err(wrap_dbus_error)?
-            .track_id()
-            .ok_or_else(|| "Error: nothing is currently playing!".to_owned())?;
-        self.player
-            .set_position(track_id, &Duration::from_millis(state.as_millis()))
-            .map_err(wrap_dbus_error)?;
-        Ok(())
+            let track_id = self
+                .player
+                .get_metadata()
+                .map_err(wrap_dbus_error)?
+                .track_id()
+                .ok_or_else(|| "Error: nothing is currently playing!".to_owned())?;
+            self.player
+                .set_position(track_id, &Duration::from_millis(state.as_millis()))
+                .map_err(wrap_dbus_error)?;
+            Ok(())
         };
         fut.boxed_local()
     }

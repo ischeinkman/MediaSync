@@ -1,292 +1,284 @@
-pub mod sync {
-    use crate::messages::{PlayerPosition, PlayerState, SyncMessage};
-    use crate::messages::{TimeDelta, TimeStamp, UserId};
-    use crate::utils::AbsSub;
-    use crate::DynResult;
-    use futures::future::FutureExt;
-    use futures::future::LocalBoxFuture;
-    use std::collections::HashMap;
+use crate::messages::{PlayerPosition, PlayerState, SyncMessage};
+use crate::messages::{TimeDelta, TimeStamp, UserId};
+use crate::utils::AbsSub;
+use crate::DynResult;
+use futures::future::FutureExt;
+use futures::future::LocalBoxFuture;
+use std::collections::HashMap;
 
-    #[derive(Clone, Eq, PartialEq, Debug)]
-    pub struct SyncConfig {
-        pub id: UserId,
-        pub pos_err_threshold: TimeDelta,
-        pub jump_threshold: TimeDelta,
-        pub jump_if_backwards: bool,
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct SyncConfig {
+    pub id: UserId,
+    pub pos_err_threshold: TimeDelta,
+    pub jump_threshold: TimeDelta,
+    pub jump_if_backwards: bool,
+}
+
+impl SyncConfig {
+    pub fn new() -> Self {
+        Self::default()
     }
+}
 
-    impl SyncConfig {
-        pub fn new() -> Self {
-            Self::default()
+impl Default for SyncConfig {
+    fn default() -> Self {
+        let id_bytes: [u8; 16] = rand::random();
+        let id = UserId::from_bytes(&id_bytes);
+        let pos_err_threshold = TimeDelta::from_millis(400);
+        let jump_threshold = TimeDelta::from_millis(3000);
+        let jump_if_backwards = false;
+        Self {
+            id,
+            pos_err_threshold,
+            jump_threshold,
+            jump_if_backwards,
         }
     }
+}
+pub struct SyncPlayerWrapper<T: SyncPlayer> {
+    player: T,
+    config: SyncConfig,
+    previous_status: SyncMessage,
+    previous_event_times: HashMap<UserId, TimeStamp>,
+    last_state_push_time: TimeStamp,
+    last_jump_time: TimeStamp,
+}
 
-    impl Default for SyncConfig {
-        fn default() -> Self {
-            let id_bytes: [u8; 16] = rand::random();
-            let id = UserId::from_bytes(&id_bytes);
-            let pos_err_threshold = TimeDelta::from_millis(400);
-            let jump_threshold = TimeDelta::from_millis(3000);
-            let jump_if_backwards = false;
-            Self {
-                id,
-                pos_err_threshold,
-                jump_threshold,
-                jump_if_backwards,
-            }
-        }
+impl<T: SyncPlayer> SyncPlayerWrapper<T> {
+    pub async fn new(player: T, config: SyncConfig) -> DynResult<Self> {
+        let cur_state = player.get_state().await.unwrap();
+        let cur_pos = player.get_pos().await.unwrap();
+        let cur_time = TimeStamp::now();
+        let mut previous_status = SyncMessage::zero();
+        previous_status.set_source_id(config.id);
+        previous_status.set_created(cur_time);
+        previous_status.set_state(cur_state);
+        previous_status.set_position(cur_pos);
+        previous_status.set_jumped(false);
+        previous_status.set_changed_state(false);
+        let previous_event_times = HashMap::new();
+        Ok(Self {
+            player,
+            config,
+            previous_status,
+            previous_event_times,
+            last_jump_time: cur_time,
+            last_state_push_time: cur_time,
+        })
     }
-    pub struct SyncPlayerWrapper<T: SyncPlayer> {
-        player: T,
-        config: SyncConfig,
-        previous_status: SyncMessage,
-        previous_event_times: HashMap<UserId, TimeStamp>,
-        last_state_push_time: TimeStamp,
-        last_jump_time: TimeStamp,
+
+    fn should_process(&self, message: SyncMessage) -> bool {
+        if message.source_id() == self.config.id {
+            return false;
+        }
+        self.previous_event_times
+            .get(&message.source_id())
+            .map(|&ts| ts < message.created())
+            .unwrap_or(true)
     }
 
-    impl<T: SyncPlayer> SyncPlayerWrapper<T> {
-        pub async fn new(player: T, config: SyncConfig) -> DynResult<Self> {
-            let cur_state = player.get_state().await.unwrap();
-            let cur_pos = player.get_pos().await.unwrap();
-            let cur_time = TimeStamp::now();
-            let mut previous_status = SyncMessage::zero();
-            previous_status.set_source_id(config.id);
-            previous_status.set_created(cur_time);
-            previous_status.set_state(cur_state);
-            previous_status.set_position(cur_pos);
-            previous_status.set_jumped(false);
-            previous_status.set_changed_state(false);
-            let previous_event_times = HashMap::new();
-            Ok(Self {
-                player,
-                config,
-                previous_status,
-                previous_event_times,
-                last_jump_time: cur_time,
-                last_state_push_time: cur_time,
-            })
+    async fn process_state_change(&self, message: SyncMessage) -> DynResult<Option<PlayerState>> {
+        // Only push if we actually need to
+        if self.previous_status.state() == message.state() {
+            return Ok(None);
         }
-
-        fn should_process(&self, message: SyncMessage) -> bool {
-            if message.source_id() == self.config.id {
-                return false;
-            }
-            self.previous_event_times
-                .get(&message.source_id())
-                .map(|&ts| ts < message.created())
-                .unwrap_or(true)
-        }
-
-        async fn process_state_change(
-            &self,
-            message: SyncMessage,
-        ) -> DynResult<Option<PlayerState>> {
-            // Only push if we actually need to
-            if self.previous_status.state() == message.state() {
-                return Ok(None);
-            }
-            // If we got a valid state push, do it.
-            let should_push_state =
-                message.changed_state() && message.created() > self.last_state_push_time;
-            if should_push_state {
-                log::info!(
-                    "Got a state change! Now changing state to {:?}.",
-                    message.state()
-                );
-                return Ok(Some(message.state()));
-            }
-            // We are currently desynched with the remote.
-
-            // If the local player got pushed between messages, just wait
-            // for the local event to get broadcast and ignore the desynch.
-            let current_state = self.player.get_state().await.unwrap();
-            if current_state != self.previous_status.state() {
-                log::warn!("Player changed state mid push.");
-                return Ok(None);
-            }
-            // Otherwise, default to Pause.
-            let nstate = PlayerState::Paused;
-            log::warn!(
-                "Got a state desync with another player: {:?} , {:?}. Defaulting to {:?}.",
-                current_state,
-                message.state(),
-                nstate
+        // If we got a valid state push, do it.
+        let should_push_state =
+            message.changed_state() && message.created() > self.last_state_push_time;
+        if should_push_state {
+            log::info!(
+                "Got a state change! Now changing state to {:?}.",
+                message.state()
             );
-            Ok(Some(nstate))
+            return Ok(Some(message.state()));
         }
+        // We are currently desynched with the remote.
 
-        async fn process_pos_change(
-            &self,
-            message: SyncMessage,
-        ) -> DynResult<Option<(PlayerPosition, bool)>> {
-            // 1: Get the current *expected* position of the player
-            let current_time = TimeStamp::now();
-            let current_pos = self
-                .previous_status
-                .projected_to_time(current_time)
-                .position();
+        // If the local player got pushed between messages, just wait
+        // for the local event to get broadcast and ignore the desynch.
+        let current_state = self.player.get_state().await.unwrap();
+        if current_state != self.previous_status.state() {
+            log::warn!("Player changed state mid push.");
+            return Ok(None);
+        }
+        // Otherwise, default to Pause.
+        let nstate = PlayerState::Paused;
+        log::warn!(
+            "Got a state desync with another player: {:?} , {:?}. Defaulting to {:?}.",
+            current_state,
+            message.state(),
+            nstate
+        );
+        Ok(Some(nstate))
+    }
 
-            // 2: Get the current (expected) position of the remote, and check if we need to jump at all
-            let expected_pos = message.projected_to_time(current_time).position();
-            let has_pos_diff = current_pos.abs_sub(expected_pos) > self.config.pos_err_threshold;
-            let past_last_jump = message.created() > self.last_jump_time;
-            if !(has_pos_diff && past_last_jump) {
-                return Ok(None);
-            }
-            // 3: Did the remote jump? If so just push the remote's time.
-            if message.jumped() {
-                log::info!(
-                    "Got a remote jump! Now jumping to {}.",
-                    expected_pos.as_millis()
-                );
-                return Ok(Some((expected_pos, true)));
-            }
+    async fn process_pos_change(
+        &self,
+        message: SyncMessage,
+    ) -> DynResult<Option<(PlayerPosition, bool)>> {
+        // 1: Get the current *expected* position of the player
+        let current_time = TimeStamp::now();
+        let current_pos = self
+            .previous_status
+            .projected_to_time(current_time)
+            .position();
 
-            // 4: Get the local player's actual position, in case of deviation from the expected.
-            let player_pos = self.player.get_pos().await.unwrap();
-            let different_mag = player_pos.abs_sub(current_pos);
-            let jumped_back = self.config.jump_if_backwards && player_pos < current_pos;
-
-            // 5: If the local player jumped while processing the message, do nothing and let the jump get pushed on next query.
-            if different_mag > self.config.jump_threshold || jumped_back {
-                log::warn!("Player jumped mid push.");
-                return Ok(None);
-            }
-
-            // 6: Otherwise, correct the desync.
-            log::warn!(
-                "Got a position desync with another player. We are at {} ({}), but they are at {}.",
-                current_pos.as_millis(),
-                player_pos.as_millis(),
+        // 2: Get the current (expected) position of the remote, and check if we need to jump at all
+        let expected_pos = message.projected_to_time(current_time).position();
+        let has_pos_diff = current_pos.abs_sub(expected_pos) > self.config.pos_err_threshold;
+        let past_last_jump = message.created() > self.last_jump_time;
+        if !(has_pos_diff && past_last_jump) {
+            return Ok(None);
+        }
+        // 3: Did the remote jump? If so just push the remote's time.
+        if message.jumped() {
+            log::info!(
+                "Got a remote jump! Now jumping to {}.",
                 expected_pos.as_millis()
             );
-            log::warn!(
-                "Position error: {} ({}) VS {}",
-                current_pos.abs_sub(expected_pos).as_millis(),
-                player_pos.abs_sub(expected_pos).as_millis(),
-                self.config.pos_err_threshold.as_millis()
+            return Ok(Some((expected_pos, true)));
+        }
+
+        // 4: Get the local player's actual position, in case of deviation from the expected.
+        let player_pos = self.player.get_pos().await.unwrap();
+        let different_mag = player_pos.abs_sub(current_pos);
+        let jumped_back = self.config.jump_if_backwards && player_pos < current_pos;
+
+        // 5: If the local player jumped while processing the message, do nothing and let the jump get pushed on next query.
+        if different_mag > self.config.jump_threshold || jumped_back {
+            log::warn!("Player jumped mid push.");
+            return Ok(None);
+        }
+
+        // 6: Otherwise, correct the desync.
+        log::warn!(
+            "Got a position desync with another player. We are at {} ({}), but they are at {}.",
+            current_pos.as_millis(),
+            player_pos.as_millis(),
+            expected_pos.as_millis()
+        );
+        log::warn!(
+            "Position error: {} ({}) VS {}",
+            current_pos.abs_sub(expected_pos).as_millis(),
+            player_pos.abs_sub(expected_pos).as_millis(),
+            self.config.pos_err_threshold.as_millis()
+        );
+        log::warn!("Now attempting to rectify.");
+
+        // 7: Verify that we actually need to correct a desynch, or if the reported time just drifted.
+        if player_pos.abs_sub(expected_pos) <= self.config.pos_err_threshold {
+            log::warn!("Not rectifying since it seems our actual position is okay?");
+            return Ok(Some((player_pos, false)));
+        }
+
+        // 8: If there really is a desynch and the desynch is backwards, we still add a small offset o account for processing time.
+        let offset_millis = if expected_pos < current_pos {
+            self.config.pos_err_threshold.as_millis() / 3
+        } else {
+            0
+        };
+        let npos = expected_pos + TimeDelta::from_millis(offset_millis);
+        Ok(Some((npos, true)))
+    }
+    pub async fn push_sync_status(&mut self, message: SyncMessage) -> DynResult<ShouldRebroadcast> {
+        // Verify that we need to process the message at all
+        if !self.should_process(message) {
+            return Ok(false);
+        }
+
+        let mut next_status = self.previous_status;
+
+        // Update playpause state
+        if let Some(nxt) = self.process_state_change(message).await? {
+            next_status.set_created(TimeStamp::now());
+            next_status.set_state(nxt);
+            self.player.set_state(nxt).await.unwrap();
+            self.last_state_push_time = message.created();
+        }
+
+        // Update player position
+        if let Some((npos, should_push)) = self.process_pos_change(message).await? {
+            next_status.set_created(TimeStamp::now());
+            next_status.set_position(npos);
+            if should_push {
+                self.player.set_pos(npos).await.unwrap();
+                self.last_jump_time = message.created();
+            }
+        }
+
+        // Update the previous time map
+        self.previous_event_times
+            .insert(message.source_id(), message.created());
+        self.previous_status = next_status;
+        Ok(true)
+    }
+    async fn inner_status(&self) -> DynResult<SyncMessage> {
+        let prev_status = self.previous_status;
+        let mut retvl = SyncMessage::zero();
+        let now = TimeStamp::now();
+        retvl.set_created(now);
+        retvl.set_source_id(self.config.id);
+
+        let cur_play_state = self.player.get_state().await?;
+        let changed_status = cur_play_state != prev_status.state();
+        retvl.set_state(cur_play_state);
+        retvl.set_changed_state(changed_status);
+
+        let cur_pos = self.player.get_pos().await?;
+        let expected_pos = prev_status.projected_to_time(now).position();
+        let err = cur_pos.abs_sub(expected_pos);
+        let jump_back = self.config.jump_if_backwards && cur_pos < expected_pos;
+        let jumped = (err > self.config.jump_threshold) || jump_back;
+        retvl.set_jumped(jumped);
+        retvl.set_position(cur_pos);
+        Ok(retvl)
+    }
+    pub async fn get_sync_status(&mut self) -> DynResult<SyncMessage> {
+        let next_status = self.inner_status().await?;
+        self.previous_status = next_status;
+        if next_status.changed_state() || next_status.jumped() {
+            log::info!(
+                "Local player raised event flags: ({:?}, {:?}) with values ({:?}, {:?})",
+                next_status.changed_state(),
+                next_status.jumped(),
+                next_status.state(),
+                next_status.position()
             );
-            log::warn!("Now attempting to rectify.");
-
-            // 7: Verify that we actually need to correct a desynch, or if the reported time just drifted.
-            if player_pos.abs_sub(expected_pos) <= self.config.pos_err_threshold {
-                log::warn!("Not rectifying since it seems our actual position is okay?");
-                return Ok(Some((player_pos, false)));
+            if next_status.changed_state() {
+                self.last_state_push_time = next_status.created();
             }
-
-            // 8: If there really is a desynch and the desynch is backwards, we still add a small offset o account for processing time.
-            let offset_millis = if expected_pos < current_pos {
-                self.config.pos_err_threshold.as_millis() / 3
-            } else {
-                0
-            };
-            let npos = expected_pos + TimeDelta::from_millis(offset_millis);
-            Ok(Some((npos, true)))
+            if next_status.jumped() {
+                self.last_jump_time = next_status.created();
+            }
         }
-        pub async fn push_sync_status(
-            &mut self,
-            message: SyncMessage,
-        ) -> DynResult<ShouldRebroadcast> {
-            // Verify that we need to process the message at all
-            if !self.should_process(message) {
-                return Ok(false);
-            }
-
-            let mut next_status = self.previous_status;
-
-            // Update playpause state
-            if let Some(nxt) = self.process_state_change(message).await? {
-                next_status.set_created(TimeStamp::now());
-                next_status.set_state(nxt);
-                self.player.set_state(nxt).await.unwrap();
-                self.last_state_push_time = message.created();
-            }
-
-            // Update player position
-            if let Some((npos, should_push)) = self.process_pos_change(message).await? {
-                next_status.set_created(TimeStamp::now());
-                next_status.set_position(npos);
-                if should_push {
-                    self.player.set_pos(npos).await.unwrap();
-                    self.last_jump_time = message.created();
-                }
-            }
-
-            // Update the previous time map
-            self.previous_event_times
-                .insert(message.source_id(), message.created());
-            self.previous_status = next_status;
-            Ok(true)
-        }
-        async fn inner_status(&self) -> DynResult<SyncMessage> {
-            let prev_status = self.previous_status;
-            let mut retvl = SyncMessage::zero();
-            let now = TimeStamp::now();
-            retvl.set_created(now);
-            retvl.set_source_id(self.config.id);
-
-            let cur_play_state = self.player.get_state().await?;
-            let changed_status = cur_play_state != prev_status.state();
-            retvl.set_state(cur_play_state);
-            retvl.set_changed_state(changed_status);
-
-            let cur_pos = self.player.get_pos().await?;
-            let expected_pos = prev_status.projected_to_time(now).position();
-            let err = cur_pos.abs_sub(expected_pos);
-            let jump_back = self.config.jump_if_backwards && cur_pos < expected_pos;
-            let jumped = (err > self.config.jump_threshold) || jump_back;
-            retvl.set_jumped(jumped);
-            retvl.set_position(cur_pos);
-            Ok(retvl)
-        }
-        pub async fn get_sync_status(&mut self) -> DynResult<SyncMessage> {
-            let next_status = self.inner_status().await?;
-            self.previous_status = next_status;
-            if next_status.changed_state() || next_status.jumped() {
-                log::info!(
-                    "Local player raised event flags: ({:?}, {:?}) with values ({:?}, {:?})",
-                    next_status.changed_state(),
-                    next_status.jumped(),
-                    next_status.state(),
-                    next_status.position()
-                );
-                if next_status.changed_state() {
-                    self.last_state_push_time = next_status.created();
-                }
-                if next_status.jumped() {
-                    self.last_jump_time = next_status.created();
-                }
-            }
-            Ok(next_status)
-        }
+        Ok(next_status)
     }
-    pub type ShouldRebroadcast = bool;
+}
+pub type ShouldRebroadcast = bool;
 
-    pub trait SyncPlayer {
-        fn get_state<'a>(&'a self) -> LocalBoxFuture<'a, DynResult<PlayerState>>;
-        fn set_state<'a>(&'a mut self, state: PlayerState) -> LocalBoxFuture<'a, DynResult<()>>;
-        fn get_pos<'a>(&'a self) -> LocalBoxFuture<'a, DynResult<PlayerPosition>>;
-        fn set_pos<'a>(&'a mut self, state: PlayerPosition) -> LocalBoxFuture<'a, DynResult<()>>;
-    }
+pub trait SyncPlayer {
+    fn get_state<'a>(&'a self) -> LocalBoxFuture<'a, DynResult<PlayerState>>;
+    fn set_state<'a>(&'a mut self, state: PlayerState) -> LocalBoxFuture<'a, DynResult<()>>;
+    fn get_pos<'a>(&'a self) -> LocalBoxFuture<'a, DynResult<PlayerPosition>>;
+    fn set_pos<'a>(&'a mut self, state: PlayerPosition) -> LocalBoxFuture<'a, DynResult<()>>;
+}
 
-    impl<'a> SyncPlayer for Box<dyn SyncPlayer + 'a> {
-        fn get_state(&self) -> LocalBoxFuture<'_, DynResult<PlayerState>> {
-            async move { self.as_ref().get_state().await }.boxed_local()
-        }
-        fn set_state(&mut self, state: PlayerState) -> LocalBoxFuture<'_, DynResult<()>> {
-            async move { self.as_mut().set_state(state).await }.boxed_local()
-        }
-        fn get_pos(&self) -> LocalBoxFuture<'_, DynResult<PlayerPosition>> {
-            async move { self.as_ref().get_pos().await }.boxed_local()
-        }
-        fn set_pos(&mut self, state: PlayerPosition) -> LocalBoxFuture<'_, DynResult<()>> {
-            async move { self.as_mut().set_pos(state).await }.boxed_local()
-        }
+impl<'a> SyncPlayer for Box<dyn SyncPlayer + 'a> {
+    fn get_state(&self) -> LocalBoxFuture<'_, DynResult<PlayerState>> {
+        async move { self.as_ref().get_state().await }.boxed_local()
     }
+    fn set_state(&mut self, state: PlayerState) -> LocalBoxFuture<'_, DynResult<()>> {
+        async move { self.as_mut().set_state(state).await }.boxed_local()
+    }
+    fn get_pos(&self) -> LocalBoxFuture<'_, DynResult<PlayerPosition>> {
+        async move { self.as_ref().get_pos().await }.boxed_local()
+    }
+    fn set_pos(&mut self, state: PlayerPosition) -> LocalBoxFuture<'_, DynResult<()>> {
+        async move { self.as_mut().set_pos(state).await }.boxed_local()
+    }
+}
 
-    pub trait SyncPlayerList: Sized {
-        fn new() -> DynResult<Self>;
-        fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer>)>>;
-    }
+pub trait SyncPlayerList: Sized {
+    fn new() -> DynResult<Self>;
+    fn get_players(&mut self) -> DynResult<Vec<(String, Box<dyn SyncPlayer>)>>;
 }

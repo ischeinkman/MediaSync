@@ -15,7 +15,7 @@ mod webui;
 mod webview_helper;
 use messages::{Message, TimeStamp};
 use network::NetworkManager;
-use traits::sync::{SyncPlayer, SyncPlayerWrapper};
+use traits::{SyncPlayer, SyncPlayerWrapper};
 
 use futures::future::FutureExt;
 use futures::StreamExt;
