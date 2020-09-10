@@ -9,6 +9,7 @@ mod network;
 mod cmdui;
 mod logging;
 mod traits;
+mod config;
 #[cfg(feature = "webui")]
 mod webui;
 #[cfg(feature = "webui")]
