@@ -1,5 +1,8 @@
+#[cfg(feature = "vlchttp")]
 mod vlchttp;
 mod vlcrc;
+
+#[cfg(feature = "netflix")]
 mod netflix_chrome;
 use super::DynResult;
 
@@ -26,20 +29,26 @@ use super::traits::sync::{SyncPlayer, SyncPlayerList};
 pub struct BulkSyncPlayerList {
     mpris: MprisPlayerList,
     vlcrc: vlcrc::VlcRcList,
+    #[cfg(feature = "vlchttp")]
     vlchttp: vlchttp::VlcHttpList,
-    netflix_chrome : netflix_chrome::NetflixPlayerList, 
+    #[cfg(feature = "netflix")]
+    netflix_chrome: netflix_chrome::NetflixPlayerList,
 }
 
 impl SyncPlayerList for BulkSyncPlayerList {
     fn new() -> DynResult<Self> {
         let mpris = MprisPlayerList::new()?;
         let vlcrc = vlcrc::VlcRcList::new()?;
+        #[cfg(feature = "vlchttp")]
         let vlchttp = vlchttp::VlcHttpList::new()?;
+        #[cfg(feature = "netflix")]
         let netflix_chrome = netflix_chrome::NetflixPlayerList::new()?;
         Ok(Self {
             mpris,
             vlcrc,
+            #[cfg(feature = "vlchttp")]
             vlchttp,
+            #[cfg(feature = "netflix")]
             netflix_chrome,
         })
     }
@@ -52,11 +61,17 @@ impl SyncPlayerList for BulkSyncPlayerList {
         let mut vlcrc_players = self.vlcrc.get_players()?;
         retvl.append(&mut vlcrc_players);
 
-        let mut vlchttp_players = self.vlchttp.get_players()?;
-        retvl.append(&mut vlchttp_players);
+        #[cfg(feature = "vlchttp")]
+        {
+            let mut vlchttp_players = self.vlchttp.get_players()?;
+            retvl.append(&mut vlchttp_players);
+        }
 
-        let mut netflix_chrome_players = self.netflix_chrome.get_players()?;
-        retvl.append(&mut netflix_chrome_players);
+        #[cfg(feature = "netflix")]
+        {
+            let mut netflix_chrome_players = self.netflix_chrome.get_players()?;
+            retvl.append(&mut netflix_chrome_players);
+        }
 
         Ok(retvl)
     }

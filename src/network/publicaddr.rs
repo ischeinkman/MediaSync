@@ -1,6 +1,11 @@
+#[cfg(feature = "dnsmapping")]
 mod igdutils;
-mod stunutils;
+#[cfg(feature = "dnsmapping")]
 use self::igdutils::{IgdArgs, IgdMapping};
+
+#[cfg(feature = "stunmapping")]
+mod stunutils;
+#[cfg(feature = "stunmapping")]
 use self::stunutils::{StunMapping, StunMappingError};
 
 use std::fmt;
@@ -8,8 +13,12 @@ use std::net::{IpAddr, SocketAddr};
 use tokio::net::UdpSocket;
 
 pub enum PublicAddr {
-    Igd(IgdMapping),
     Raw(SocketAddr),
+
+    #[cfg(feature = "dnsmapping")]
+    Igd(IgdMapping),
+
+    #[cfg(feature = "stunmapping")]
     Stun(StunMapping),
 }
 
@@ -19,8 +28,12 @@ pub enum PublicAddrError {
     InvalidAddress(SocketAddr),
     Io(std::io::Error),
     Ipv6NotYetImplemented(std::net::Ipv6Addr),
-    Igd(igd::Error),
+
+    #[cfg(feature = "stunmapping")]
     Stun(StunMappingError),
+    #[cfg(feature = "dnsmapping")]
+    Igd(igd::Error),
+    #[cfg(feature = "dnsmapping")]
     InvalidProtocol(igd::PortMappingProtocol),
 }
 
@@ -42,13 +55,16 @@ impl fmt::Display for PublicAddrError {
                 "Ipv6 is not yet supported for public addrs: {}",
                 addr
             )),
+            #[cfg(feature = "dnsmapping")]
             PublicAddrError::Igd(igderror) => {
                 f.write_fmt(format_args!("Error making public addr (IGD): {}", igderror))
             }
+            #[cfg(feature = "stunmapping")]
             PublicAddrError::Stun(stunerror) => f.write_fmt(format_args!(
                 "Error making public addr (STUN): {}",
                 stunerror
             )),
+            #[cfg(feature = "dnsmapping")]
             PublicAddrError::InvalidProtocol(proto) => {
                 let protostr = match proto {
                     igd::PortMappingProtocol::TCP => "TCP",
@@ -68,6 +84,7 @@ impl From<std::io::Error> for PublicAddrError {
         Self::Io(inner)
     }
 }
+#[cfg(feature = "dnsmapping")]
 impl From<igd::Error> for PublicAddrError {
     fn from(inner: igd::Error) -> Self {
         Self::Igd(inner)
@@ -106,7 +123,9 @@ impl PublicAddr {
     pub fn addr(&self) -> SocketAddr {
         match self {
             PublicAddr::Raw(addr) => *addr,
+            #[cfg(feature = "dnsmapping")]
             PublicAddr::Igd(mapping) => mapping.public_addr(),
+            #[cfg(feature = "stunmapping")]
             PublicAddr::Stun(mapping) => mapping.public_addr(),
         }
     }
@@ -133,6 +152,7 @@ impl PublicAddr {
             IpAddr::V6(inner) => Err(PublicAddrError::Ipv6NotYetImplemented(inner)),
         }
     }
+    #[cfg(feature = "dnsmapping")]
     async fn try_igd(
         addr: SocketAddr,
         proto: igd::PortMappingProtocol,
@@ -147,6 +167,7 @@ impl PublicAddr {
             SocketAddr::V6(inner) => Err(PublicAddrError::Ipv6NotYetImplemented(*inner.ip())),
         }
     }
+    #[cfg(feature = "stunmapping")]
     async fn try_stun(con: &mut UdpSocket) -> Result<Self, PublicAddrError> {
         match StunMapping::get_mapping(con).await {
             Ok(mapping) => Ok(Self::Stun(mapping)),
@@ -170,23 +191,43 @@ impl PublicAddr {
                 e
             }
         };
-        let proto = args.proto();
-        let igd_res = Self::try_igd(addr, proto).await;
-        let _igd_err = match igd_res {
-            Ok(ret) => {
-                return Ok(ret);
-            }
-            Err(e) => {
-                log::info!("Got error from IGD public mapper: {}", e);
-                e
+        #[cfg(feature = "dnsmapping")]
+        let _igd_err = {
+            let proto = args.proto();
+            let igd_res = Self::try_igd(addr, proto).await;
+            match igd_res {
+                Ok(ret) => {
+                    return Ok(ret);
+                }
+                Err(e) => {
+                    log::info!("Got error from IGD public mapper: {}", e);
+                    e
+                }
             }
         };
+        #[cfg(not(feature = "dnsmapping"))]
+        let _igd_err = _noop_err;
         let stun_res = if let OpenPublicArgs::UdpCon(con) = args {
-            Self::try_stun(con).await
+            #[cfg(feature = "stunmapping")]
+            {
+                Self::try_stun(con).await
+            }
+
+            #[cfg(not(feature = "stunmapping"))]
+            {
+                Err(PublicAddrError::Io(std::io::ErrorKind::Other.into()))
+            }
         } else {
-            Err(PublicAddrError::InvalidProtocol(
-                igd::PortMappingProtocol::TCP,
-            ))
+            #[cfg(feature = "dnsmapping")]
+            {
+                Err(PublicAddrError::InvalidProtocol(
+                    igd::PortMappingProtocol::TCP,
+                ))
+            }
+            #[cfg(not(feature = "dnsmapping"))]
+            {
+                Err(PublicAddrError::InvalidAddress(args.addr().unwrap()))
+            }
         };
         let _stun_err = match stun_res {
             Ok(ret) => {
@@ -207,6 +248,7 @@ pub enum OpenPublicArgs<'a> {
 }
 
 impl<'a> OpenPublicArgs<'a> {
+    #[cfg(feature = "dnsmapping")]
     pub fn proto(&self) -> igd::PortMappingProtocol {
         match self {
             Self::TcpAddr(_) => igd::PortMappingProtocol::TCP,

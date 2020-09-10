@@ -309,26 +309,34 @@ impl LogSink for StderrLogSink {
     }
 }
 
-pub struct WebLogSink<T> {
-    interface: web_view::Handle<T>,
+#[cfg(feature = "webui")]
+mod weblogger {
+    use super::*;
+
+    pub struct WebLogSink<T> {
+        interface: web_view::Handle<T>,
+    }
+
+    impl<T> WebLogSink<T> {
+        pub fn new(interface: web_view::Handle<T>) -> Self {
+            Self { interface }
+        }
+    }
+
+    impl<T> LogSink for WebLogSink<T> {
+        fn key(&self) -> SinkKey {
+            SinkKey::fixed("WebLogger")
+        }
+        fn log<'a>(&self, msg: std::fmt::Arguments<'a>) -> crate::DynResult<()> {
+            let cmd = format!("frontend_interface.mylog('{}')", msg);
+            self.interface.dispatch(move |wv| wv.eval(&cmd))?;
+            Ok(())
+        }
+        fn flush(&self) -> crate::DynResult<()> {
+            Ok(())
+        }
+    }
 }
 
-impl<T> WebLogSink<T> {
-    pub fn new(interface: web_view::Handle<T>) -> Self {
-        Self { interface }
-    }
-}
-
-impl<T> LogSink for WebLogSink<T> {
-    fn key(&self) -> SinkKey {
-        SinkKey::fixed("WebLogger")
-    }
-    fn log<'a>(&self, msg: std::fmt::Arguments<'a>) -> crate::DynResult<()> {
-        let cmd = format!("frontend_interface.mylog('{}')", msg);
-        self.interface.dispatch(move |wv| wv.eval(&cmd))?;
-        Ok(())
-    }
-    fn flush(&self) -> crate::DynResult<()> {
-        Ok(())
-    }
-}
+#[cfg(feature = "webui")]
+pub use weblogger::*;

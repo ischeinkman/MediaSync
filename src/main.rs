@@ -6,10 +6,12 @@ mod players;
 
 mod network;
 
-mod traits;
-mod logging;
 mod cmdui;
+mod logging;
+mod traits;
+#[cfg(feature = "webui")]
 mod webui;
+#[cfg(feature = "webui")]
 mod webview_helper;
 use network::NetworkManager;
 use protocols::{Message, TimeStamp};
@@ -38,7 +40,8 @@ pub fn main() -> DynResult<()> {
         .build()?;
     let local_set = tokio::task::LocalSet::new();
 
-    if use_gui() {
+    if use_gui() && cfg!(feature = "webui") {
+        #[cfg(feature = "webui")]
         runtime
             .block_on(async {
                 let res = local_set.spawn_local(webui::run());
