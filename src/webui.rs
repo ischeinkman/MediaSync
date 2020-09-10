@@ -1,3 +1,4 @@
+use crate::logging::{LogSinkConfig, LogSinkWrapper, WebLogSink};
 use crate::network::friendcodes::FriendCode;
 use crate::network::NetworkManager;
 use crate::players::BulkSyncPlayerList;
@@ -10,7 +11,6 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use web_view::WebView;
-use crate::logging::{WebLogSink, LogSinkWrapper, LogSinkConfig};
 
 const WEBPAGE: &str = include_str!("../static/webui.html");
 
@@ -37,7 +37,6 @@ pub enum Command {
     AddConnection { code: String },
 }
 
-
 async fn update_local_info<T>(network_ref: &Arc<NetworkManager>, handle: web_view::Handle<T>) {
     let local_addr = network_ref.local_addr();
     let local_code = FriendCode::from_addr(local_addr).as_friend_code();
@@ -51,7 +50,7 @@ async fn update_local_info<T>(network_ref: &Arc<NetworkManager>, handle: web_vie
         .dispatch(move |view| {
             let cmd = format!(
                 "frontend_interface.set_local_con_info({})",
-                info_map.to_jsobject().to_string()
+                info_map.into_jsobject().to_string()
             );
             view.eval(&cmd)
         })
@@ -89,7 +88,7 @@ impl JsArgs {
         self
     }
 
-    pub fn to_jsobject(self) -> JSValue {
+    pub fn into_jsobject(self) -> JSValue {
         JSValue::Object(self.fields)
     }
 }
@@ -101,7 +100,7 @@ fn update_remote_connections(view: &mut web_view::WebView<WebuiState>) -> web_vi
         .map(|code| {
             JsArgs::new()
                 .with_str("friend_code", code.as_friend_code())
-                .to_jsobject()
+                .into_jsobject()
         })
         .collect::<JSValue>();
     let cmd = format!("frontend_interface.set_connections({})", codes.to_string());
@@ -113,7 +112,10 @@ fn setup_logger(handle: &web_view::Handle<WebuiState>) {
     let log_handle = LogSinkWrapper::get_handle();
     log::info!("Setting logger.");
     log_handle.add_logger(WebLogSink::new(href), LogSinkConfig::new().enable_all());
-    log_handle.add_logger(crate::logging::StdoutLogSink::new(), LogSinkConfig::new().enable_all().with_nonlocal(true));
+    log_handle.add_logger(
+        crate::logging::StdoutLogSink::new(),
+        LogSinkConfig::new().enable_all().with_nonlocal(true),
+    );
     log::info!("Logger set.");
 }
 
@@ -144,7 +146,7 @@ async fn select_player(handle: &web_view::Handle<WebuiState>) -> Box<dyn SyncPla
         .map(|(name, _)| {
             JsArgs::new()
                 .with_str("name", name.to_owned())
-                .to_jsobject()
+                .into_jsobject()
         })
         .collect::<JSValue>();
     log::info!("Player list collected.");
@@ -192,7 +194,9 @@ pub async fn run() -> crate::DynResult<()> {
     let sync_task_generator = move || async move {
         let player = {
             let raw_player = select_player(&handle).await;
-            let wrapped_player = SyncPlayerWrapper::new(raw_player, SyncConfig::new()).await.unwrap();
+            let wrapped_player = SyncPlayerWrapper::new(raw_player, SyncConfig::new())
+                .await
+                .unwrap();
             Arc::new(Mutex::new(wrapped_player))
         };
         println!("Selected player. Now updating local info.");
@@ -255,10 +259,8 @@ async fn build_webview(network_manager: &Arc<NetworkManager>) -> web_view::Handl
             .build()
             .unwrap();
         webview.step();
-        async {webview}
+        async { webview }
     };
 
-    crate::webview_helper::generate_webview(
-        retfut
-    ).await
+    crate::webview_helper::generate_webview(retfut).await
 }

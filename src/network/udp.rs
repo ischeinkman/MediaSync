@@ -65,7 +65,7 @@ impl EventSink {
                     }
                 }
                 let res = cur_res;
-                retvl.push((addr.clone(), res.map(|_| ())));
+                retvl.push((*addr, res.map(|_| ())));
             }
             futures::stream::iter(retvl)
         };
@@ -150,7 +150,7 @@ impl NetworkManager {
         self.add_connection(addr).await
     }
     async fn add_connection(&self, addr: SocketAddr) -> DynResult<()> {
-        self.connection_addrs.write().await.push(addr.clone());
+        self.connection_addrs.write().await.push(addr);
         self.new_connections_sink.send(addr).await;
         Ok(())
     }
@@ -166,7 +166,7 @@ impl NetworkManager {
                 let already_exists = existing_lock.contains(&addr);
                 drop(existing_lock);
                 if !already_exists {
-                    conref.write().await.push(addr.clone());
+                    conref.write().await.push(addr);
                     constream_ref.send(addr).await;
                 }
                 Ok(msg)
@@ -234,12 +234,11 @@ impl<T: Clone> Clone for SpmcRecv<T> {
         let queue = Arc::new(Mutex::new(Vec::new()));
         let (snd, recv) = tokio::sync::watch::channel(());
         let _cbres = self.updator.send((Arc::clone(&queue), snd));
-        let retvl = SpmcRecv {
+        SpmcRecv {
             queue,
             recv,
             updator: self.updator.clone(),
-        };
-        retvl
+        }
     }
 }
 
@@ -261,13 +260,7 @@ impl<T: Clone> SpmcSend<T> {
     pub async fn send(&self, val: T) {
         let mut cb_lock = self.new_callbacks_queue.lock().await;
         let mut new_callbacks = Vec::new();
-        loop {
-            let (queue, signal) = match cb_lock.try_recv() {
-                Ok(cb) => cb,
-                Err(_e) => {
-                    break;
-                }
-            };
+        while let Ok((queue, signal)) = cb_lock.try_recv() {
             let mut qlock = queue.lock().await;
             qlock.push(val.clone());
             drop(qlock);

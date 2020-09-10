@@ -1,3 +1,5 @@
+use std::{mem, sync::Arc};
+
 pub fn array_copy<Itm: Copy, Col: Default + AsRef<[Itm]> + AsMut<[Itm]>>(src: &[Itm]) -> Col {
     let mut retvl = Col::default();
     let retvl_ref = retvl.as_mut();
@@ -46,7 +48,6 @@ impl MyWaker {
         self.wake_flag.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
-use std::sync::Arc;
 
 impl futures::task::ArcWake for MyWaker {
     fn wake(self: Arc<Self>) {
@@ -134,8 +135,8 @@ impl<T: PartialEq> AllowOnlyOne<T> {
         }
     }
     pub fn push_next(&mut self, next: T) {
-        let nxt = std::mem::take(self).with_next(next);
-        std::mem::replace(self, nxt);
+        let nxt = mem::take(self).with_next(next);
+        *self = nxt;
     }
     pub fn with_next(self, next: T) -> Self {
         match self.state {
@@ -185,4 +186,3 @@ impl<T: PartialEq> std::iter::FromIterator<T> for AllowOnlyOne<T> {
         retvl
     }
 }
-

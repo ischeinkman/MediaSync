@@ -93,11 +93,11 @@ fn filter_clean_addr(addr: SocketAddr) -> Result<SocketAddr, PublicAddrError> {
             if ipv4.is_broadcast() || ipv4.is_documentation() {
                 return Err(PublicAddrError::InvalidAddress(addr));
             }
-            return Ok(SocketAddr::new(downcast_ip, addr.port()));
+            Ok(SocketAddr::new(downcast_ip, addr.port()))
         }
         IpAddr::V6(_ipv6) => {
             //TODO: IPv6 validity checks.
-            return Ok(addr);
+            Ok(addr)
         }
     }
 }
@@ -142,7 +142,7 @@ impl PublicAddr {
                 let args = IgdArgs::new().with_protocol(proto);
                 let igdres =
                     IgdMapping::request_any(inner, args, "MediaSync Public Address").await?;
-                return Ok(Self::Igd(igdres));
+                Ok(Self::Igd(igdres))
             }
             SocketAddr::V6(inner) => Err(PublicAddrError::Ipv6NotYetImplemented(*inner.ip())),
         }

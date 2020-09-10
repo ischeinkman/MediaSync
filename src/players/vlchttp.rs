@@ -55,7 +55,7 @@ impl HttpConfig {
             retvl.push_str("localhost");
             write!(&mut retvl, ":{}", self.bind_addr.port()).unwrap();
         } else {
-            retvl.extend(self.bind_addr.to_string().chars());
+            retvl.push_str(&self.bind_addr.to_string());
         }
         retvl.push_str("/requests/status.json");
         retvl
@@ -419,7 +419,7 @@ impl LengthEstimator {
             center % 1000,
             (max_time - min_time) / 2
         );*/
-        return PlayerPosition::from_millis(center);
+        PlayerPosition::from_millis(center)
     }
 
     fn estimate_seek(&self, new_pos: PlayerPosition) -> SeekCommand {

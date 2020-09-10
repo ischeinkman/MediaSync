@@ -237,10 +237,7 @@ impl BackgroundTask {
         }
     }
     pub fn abort(&mut self) {
-        let sndres = self.die_signal.take().map(|s| s.send(()));
-        match sndres {
-            _ => {}
-        }
+        let _sndres = self.die_signal.take().map(|s| s.send(()));
     }
 }
 

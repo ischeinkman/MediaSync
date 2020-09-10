@@ -1,5 +1,4 @@
 use crate::TimeStamp;
-use lazy_static;
 use log::{LevelFilter, Log, Metadata, Record};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -70,8 +69,7 @@ impl LogSinkConfig {
             .unwrap_or(true);
         let log_all = !self.only_local;
         let source_flag = log_all || matches_source;
-        let retvl = matches_level && source_flag;
-        retvl
+        matches_level && source_flag
     }
 }
 

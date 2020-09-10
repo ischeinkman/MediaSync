@@ -115,22 +115,21 @@ async fn try_stun(
     let _declen = decoder.decode(&mbuff, Eos::new(true))?;
     let dec: Message<Attribute> = decoder.finish_decoding()??;
     let addrs: AllowOnlyOne<_> = dec.attributes().filter_map(attribute_to_addr).collect();
-    let retvl = match addrs.into_res() {
+
+    match addrs.into_res() {
         Ok(a) => Ok(Some(a)),
         Err(AllowOnlyOneError::GotSecond(_)) => Err(StunMappingError::MultipleBindings),
         Err(AllowOnlyOneError::NoneFound) => Ok(None),
-    };
-    retvl
+    }
 }
 
 fn attribute_to_addr(attr: &Attribute) -> Option<SocketAddr> {
-    let addr = match attr {
+    match attr {
         Attribute::MappedAddress(mapped) => Some(mapped.address()),
         Attribute::XorMappedAddress(mapped) => Some(mapped.address()),
         Attribute::XorMappedAddress2(mapped) => Some(mapped.address()),
         _ => None,
-    };
-    addr
+    }
 }
 
 pub struct BrokenMessageError(BrokenMessage);
@@ -198,7 +197,7 @@ impl StunMapping {
                 Ok(None) => {
                     return Err(StunMappingError::MappingNotEstablished);
                 }
-                Err(e) => previous_addr = e.into(),
+                Err(e) => previous_addr = e,
             }
         }
         Err(previous_addr)

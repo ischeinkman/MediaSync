@@ -20,7 +20,7 @@ fn decode_ipv4(digits: [char; 6]) -> Result<u32, FriendCodeError> {
     Ok(retvl)
 }
 
-fn decode_ipv6(digits: [char; 22]) -> Result<u128, FriendCodeError>{
+fn decode_ipv6(digits: [char; 22]) -> Result<u128, FriendCodeError> {
     let mut retvl = 0u128;
     for (idx, &c) in digits.iter().enumerate() {
         let power = 21 - (idx as u32);
@@ -246,7 +246,7 @@ impl FriendCode {
 #[cfg(test)]
 mod test {
     use super::*;
-    use rand;
+
     const TRIALS: usize = 100;
     #[test]
     fn test_port_codec() {

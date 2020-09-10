@@ -1,4 +1,3 @@
-
 use futures::stream::SelectAll;
 use futures::stream::{LocalBoxStream, StreamExt};
 use std::future::Future;
@@ -40,7 +39,7 @@ impl WebviewGlobalContext {
                 *writehandle = Some(new_ctx);
             }
             drop(writehandle);
-            return WEBVIEW_CONTEXT.read().await;
+            WEBVIEW_CONTEXT.read().await
         }
     }
     #[allow(unused)]
@@ -156,7 +155,6 @@ fn webview_update_task<T: 'static>(view: WebView<'static, T>) -> Task {
         step_loop
             .map(move |_| {
                 std::thread::sleep(throttle_time);
-                ()
             })
             .boxed_local()
     }
