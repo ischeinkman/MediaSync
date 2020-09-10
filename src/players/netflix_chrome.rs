@@ -1,4 +1,4 @@
-use crate::protocols::{PlayerPosition, PlayerState};
+use crate::messages::{PlayerPosition, PlayerState};
 use crate::traits::sync::{SyncPlayer, SyncPlayerList};
 use crate::DynResult;
 

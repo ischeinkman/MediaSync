@@ -1,6 +1,6 @@
 pub mod sync {
-    use crate::protocols::sync::{PlayerPosition, PlayerState, SyncMessage};
-    use crate::protocols::{TimeDelta, TimeStamp, UserId};
+    use crate::messages::{PlayerPosition, PlayerState, SyncMessage};
+    use crate::messages::{TimeDelta, TimeStamp, UserId};
     use crate::utils::AbsSub;
     use crate::DynResult;
     use futures::future::FutureExt;

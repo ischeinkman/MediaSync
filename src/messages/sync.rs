@@ -1,5 +1,6 @@
-use super::{MessageProto, TimeDelta, TimeStamp, UserId};
+use super::{MessageKind, TimeDelta, TimeStamp, UserId};
 use crate::utils::{array_copy, AbsSub};
+
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct SyncMessage {
     // All numbers are stored in LITTLE ENDIAN.
@@ -23,7 +24,7 @@ pub struct SyncMessage {
 impl Default for SyncMessage {
     fn default() -> Self {
         let mut data = [0; 32];
-        data[24] = MessageProto::Sync.tag_byte();
+        data[24] = MessageKind::Sync.tag_byte();
         Self { raw_data: data }
     }
 }

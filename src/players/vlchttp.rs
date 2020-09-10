@@ -11,7 +11,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 
-use crate::protocols::sync::{PlayerPosition, PlayerState};
+use crate::messages::{PlayerPosition, PlayerState};
 use crate::traits::sync::{SyncPlayer, SyncPlayerList};
 use crate::DynResult;
 

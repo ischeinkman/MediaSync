@@ -1,9 +1,9 @@
 use super::DynResult;
 use std::time::SystemTime;
-pub mod sync;
+mod sync;
+use crate::utils::AbsSub;
 use std::ops::Add;
 pub use sync::{PlayerPosition, PlayerState, SyncMessage};
-use crate::utils::AbsSub;
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
 pub struct TimeStamp {
@@ -54,7 +54,7 @@ impl Add<TimeDelta> for TimeStamp {
 
 impl AbsSub for TimeStamp {
     type Output = TimeDelta;
-    fn abs_sub(self, other : Self) -> TimeDelta {
+    fn abs_sub(self, other: Self) -> TimeDelta {
         TimeDelta::from_millis(self.millis.abs_sub(other.millis))
     }
 }
@@ -97,30 +97,30 @@ impl UserId {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub enum MessageProto {
+pub enum MessageKind {
     Sync,
     Media,
 }
-impl MessageProto {
+impl MessageKind {
     pub fn tag_byte(self) -> u8 {
         match self {
-            MessageProto::Sync => 1,
-            MessageProto::Media => 2,
+            MessageKind::Sync => 1,
+            MessageKind::Media => 2,
         }
     }
 
     pub fn from_tag(tag: u8) -> Option<Self> {
         match tag {
-            1 => Some(MessageProto::Sync),
-            2 => Some(MessageProto::Media),
+            1 => Some(MessageKind::Sync),
+            2 => Some(MessageKind::Media),
             _ => None,
         }
     }
 }
 
-fn get_proto(buffer: &[u8; 32]) -> Result<MessageProto, u8> {
+fn get_proto(buffer: &[u8; 32]) -> Result<MessageKind, u8> {
     let bt = buffer[24];
-    MessageProto::from_tag(bt).ok_or(bt)
+    MessageKind::from_tag(bt).ok_or(bt)
 }
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum Message {
@@ -130,8 +130,8 @@ pub enum Message {
 impl Message {
     pub fn parse_block(block: [u8; 32]) -> DynResult<Message> {
         match get_proto(&block) {
-            Ok(MessageProto::Sync) => Ok(Message::Sync(SyncMessage::from_raw(block))),
-            Ok(MessageProto::Media) => Err("Error: Media protocol is not yet implemented"
+            Ok(MessageKind::Sync) => Ok(Message::Sync(SyncMessage::from_raw(block))),
+            Ok(MessageKind::Media) => Err("Error: Media protocol is not yet implemented"
                 .to_owned()
                 .into()),
             Err(tag) => Err(format!("Error: found invalid protocol tag {}", tag).into()),

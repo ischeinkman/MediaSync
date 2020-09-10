@@ -1,4 +1,4 @@
-mod protocols;
+mod messages;
 
 mod utils;
 
@@ -13,8 +13,8 @@ mod traits;
 mod webui;
 #[cfg(feature = "webui")]
 mod webview_helper;
+use messages::{Message, TimeStamp};
 use network::NetworkManager;
-use protocols::{Message, TimeStamp};
 use traits::sync::{SyncPlayer, SyncPlayerWrapper};
 
 use futures::future::FutureExt;

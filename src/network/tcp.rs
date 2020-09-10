@@ -1,7 +1,7 @@
+use crate::messages::Message;
 use crate::network::friendcodes::FriendCode;
 use crate::network::publicaddr::PublicAddr;
 use crate::network::utils::random_localaddr;
-use crate::protocols::Message;
 use crate::DynResult;
 
 use futures::FutureExt as FutureFutureExt;
