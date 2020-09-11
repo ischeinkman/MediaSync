@@ -1,5 +1,6 @@
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
+/// Decodes the IP portion of an IPv4 friendcode. 
 fn decode_ipv4(digits: [char; 6]) -> Result<u32, FriendCodeError> {
     let mut retvl = 0;
     for (idx, &c) in digits.iter().enumerate() {
@@ -20,6 +21,7 @@ fn decode_ipv4(digits: [char; 6]) -> Result<u32, FriendCodeError> {
     Ok(retvl)
 }
 
+/// Decodes the IP portion of an IPv6 friendcode. 
 fn decode_ipv6(digits: [char; 22]) -> Result<u128, FriendCodeError> {
     let mut retvl = 0u128;
     for (idx, &c) in digits.iter().enumerate() {
@@ -195,6 +197,7 @@ pub enum FriendCodeError {
 }
 
 impl FriendCode {
+    /// Parses a raw friend code string into a `FriendCode`. 
     pub fn from_code(code: impl AsRef<str>) -> Result<Self, FriendCodeError> {
         let code = code.as_ref();
         if code.len() == 25 {
@@ -222,10 +225,13 @@ impl FriendCode {
         decode_socketaddrv6(code).map(FriendCode::from_addr)
     }
 
+    /// Builds a `FriendCode` from an IP address and port. 
     pub fn from_addr(addr: impl Into<SocketAddr>) -> Self {
         let addr = addr.into();
         Self { addr }
     }
+
+    /// Gets the friend code as a user-facing encoded string.
     pub fn as_friend_code(self) -> String {
         match self.addr {
             SocketAddr::V4(addr) => {
@@ -238,6 +244,8 @@ impl FriendCode {
             }
         }
     }
+
+    /// Gets the friend code as an IP address and port. 
     pub fn as_addr(self) -> SocketAddr {
         self.addr
     }

@@ -12,6 +12,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::UdpSocket;
 
+/// A globally-accessible address or address mapping.
 pub enum PublicAddr {
     Raw(SocketAddr),
 
@@ -84,6 +85,7 @@ impl From<std::io::Error> for PublicAddrError {
         Self::Io(inner)
     }
 }
+
 #[cfg(feature = "dnsmapping")]
 impl From<igd::Error> for PublicAddrError {
     fn from(inner: igd::Error) -> Self {
@@ -91,6 +93,10 @@ impl From<igd::Error> for PublicAddrError {
     }
 }
 
+/// Verifies that `addr` is not categorically unable to be mapped to a publicly
+/// facing address.
+/// Examples of this are the loopback address and link-local addresses, since
+/// these are hard-coded to never leave the machine.
 fn filter_clean_addr(addr: SocketAddr) -> Result<SocketAddr, PublicAddrError> {
     if addr.ip().is_loopback() {
         return Err(PublicAddrError::MachineLocal(addr));
@@ -120,6 +126,7 @@ fn filter_clean_addr(addr: SocketAddr) -> Result<SocketAddr, PublicAddrError> {
 }
 
 impl PublicAddr {
+    /// The public IP address and port of this mapping.
     pub fn addr(&self) -> SocketAddr {
         match self {
             PublicAddr::Raw(addr) => *addr,
@@ -129,6 +136,8 @@ impl PublicAddr {
             PublicAddr::Stun(mapping) => mapping.public_addr(),
         }
     }
+
+    /// Checks if `addr` is already a publically accessible IP+Port.
     async fn try_already_public(addr: SocketAddr) -> Result<Self, PublicAddrError> {
         let wrapped_ip = if addr.ip().is_unspecified() {
             crate::network::utils::local_network_ip().await?
@@ -152,7 +161,9 @@ impl PublicAddr {
             IpAddr::V6(inner) => Err(PublicAddrError::Ipv6NotYetImplemented(inner)),
         }
     }
+
     #[cfg(feature = "dnsmapping")]
+    /// Attempts to open a DNS mapping.
     async fn try_igd(
         addr: SocketAddr,
         proto: igd::PortMappingProtocol,
@@ -167,7 +178,9 @@ impl PublicAddr {
             SocketAddr::V6(inner) => Err(PublicAddrError::Ipv6NotYetImplemented(*inner.ip())),
         }
     }
+
     #[cfg(feature = "stunmapping")]
+    /// Attempts to open a mapping based on the STUN protocol.
     async fn try_stun(con: &mut UdpSocket) -> Result<Self, PublicAddrError> {
         match StunMapping::get_mapping(con).await {
             Ok(mapping) => Ok(Self::Stun(mapping)),
@@ -242,8 +255,11 @@ impl PublicAddr {
     }
 }
 
+/// Arguments for `PublicAddre::request_public`. 
 pub enum OpenPublicArgs<'a> {
+    /// A TCP-mapped local addres.
     TcpAddr(SocketAddr),
+    /// An open UDP-mapped socket.
     UdpCon(&'a mut UdpSocket),
 }
 

@@ -1,6 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 
+
+/// Gets `SocketAddr` with the local network IP and a random port in the specified range.
 pub async fn random_localaddr(min_port: u16, max_port: u16) -> Result<SocketAddr, std::io::Error> {
     let ip = local_network_ip().await?;
     let port = random_port(min_port, max_port);
@@ -9,6 +11,7 @@ pub async fn random_localaddr(min_port: u16, max_port: u16) -> Result<SocketAddr
     Ok(addr)
 }
 
+/// Gets the local network IP address.
 pub async fn local_network_ip() -> Result<IpAddr, std::io::Error> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 40000)).await?;
     socket.connect((Ipv4Addr::new(8, 8, 8, 8), 4000)).await?;
@@ -16,6 +19,7 @@ pub async fn local_network_ip() -> Result<IpAddr, std::io::Error> {
     Ok(got_addr.ip())
 }
 
+/// Gets a random port number in a specified range.
 pub fn random_port(from: u16, to: u16) -> u16 {
     let valid_range = to - from;
     let info: u16 = rand::random();

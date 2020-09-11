@@ -1,6 +1,7 @@
 use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
 
+/// Argumeents for setting up a DNS mapping.
 pub struct IgdArgs {
     pub search_args: igd::SearchOptions,
     pub lease_duration: Duration,
@@ -49,6 +50,7 @@ impl PartialEq for IgdArgs {
 
 impl Eq for IgdArgs {}
 
+/// A DNS-based mapping from a local network IP+Port to a publicly-accessible IP+Port.
 #[derive(Clone, Eq, PartialEq)]
 pub struct IgdMapping {
     local_addr: SocketAddr,
@@ -57,6 +59,8 @@ pub struct IgdMapping {
 }
 
 impl IgdMapping {
+    /// Requests a new mapping between the local address `local_addr` to *any* publicly visible
+    /// IP and port. 
     pub async fn request_any(
         local_addr: SocketAddrV4,
         args: IgdArgs,
@@ -74,6 +78,7 @@ impl IgdMapping {
         })
     }
 
+    /// The publicly visible ip and port of this mapping.
     pub fn public_addr(&self) -> SocketAddr {
         self.public_addr
     }
