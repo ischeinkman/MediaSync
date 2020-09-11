@@ -1,7 +1,8 @@
+use crate::messages::Message;
+use crate::network::conlist::{ConnectionEvent, ConnectionsList};
 use crate::network::friendcodes::FriendCode;
 use crate::network::publicaddr::PublicAddr;
 use crate::network::utils::random_localaddr;
-use crate::messages::Message;
 use crate::DynResult;
 
 use futures::stream::FuturesUnordered;
@@ -12,7 +13,6 @@ use std::sync::Arc;
 use tokio::net::udp::{RecvHalf, SendHalf};
 use tokio::net::UdpSocket;
 use tokio::stream::Stream;
-use tokio::sync::mpsc;
 use tokio::sync::{Mutex, RwLock};
 
 fn make_event_stream(
@@ -40,7 +40,7 @@ fn make_event_stream(
 }
 
 struct EventSink {
-    addresses: Arc<RwLock<Vec<SocketAddr>>>,
+    addresses: ConnectionsList,
     senders: Vec<SendHalf>,
 }
 
@@ -50,7 +50,7 @@ impl EventSink {
         msg: Message,
     ) -> impl Stream<Item = (SocketAddr, Result<(), std::io::Error>)> + 'a {
         let retfut = async move {
-            let addresses = self.addresses.read().await;
+            let addresses = self.addresses.all_connections().await;
             let mut retvl = Vec::new();
             for addr in addresses.iter() {
                 let mut ra = self
@@ -77,9 +77,8 @@ impl EventSink {
 pub struct NetworkManager {
     local_addr: SocketAddr,
     public_addr: RwLock<Option<PublicAddr>>,
-    connection_addrs: Arc<RwLock<Vec<SocketAddr>>>,
+    conlist: ConnectionsList,
     event_sinks: Mutex<EventSink>,
-    new_connections_sink: Arc<SpmcSend<SocketAddr>>,
     recv: Arc<Mutex<Vec<RecvHalf>>>,
 }
 
@@ -95,28 +94,27 @@ impl NetworkManager {
         let local_addr = listener.local_addr().unwrap();
         let (rawrecv, rawsnd) = listener.split();
         let recv = Arc::new(Mutex::new(vec![rawrecv]));
-        let connection_addrs = Arc::new(RwLock::new(Vec::new()));
+        let conlist = ConnectionsList::new();
         let event_sinks = Mutex::new(EventSink {
-            addresses: Arc::clone(&connection_addrs),
+            addresses: conlist.clone(),
             senders: vec![rawsnd],
         });
-        let new_connections_sink = Arc::new(SpmcSend::new());
         let retvl = Self {
             local_addr,
             public_addr: RwLock::new(None),
-            connection_addrs,
+            conlist,
             event_sinks,
-            new_connections_sink,
             recv,
         };
         Ok(retvl)
     }
 
     pub fn new_connections(&self) -> impl Stream<Item = DynResult<SocketAddr>> {
-        let stream = self.new_connections_sink.new_recv();
-        futures::stream::unfold(stream, |mut strm| async {
-            let nxt = strm.next().await?;
-            Some((Ok(nxt), strm))
+        self.conlist.event_stream().filter_map(|evt| async move {
+            match evt {
+                ConnectionEvent::Add { addr } => Some(Ok(addr)),
+                _ => None,
+            }
         })
     }
 
@@ -150,25 +148,16 @@ impl NetworkManager {
         self.add_connection(addr).await
     }
     async fn add_connection(&self, addr: SocketAddr) -> DynResult<()> {
-        self.connection_addrs.write().await.push(addr);
-        self.new_connections_sink.send(addr).await;
+        self.conlist.push_connection(addr).await;
         Ok(())
     }
 
     pub fn remote_event_stream(&self) -> impl Stream<Item = DynResult<Message>> {
-        let constream_ref = Arc::clone(&self.new_connections_sink);
-        let conref = Arc::clone(&self.connection_addrs);
+        let listref = self.conlist.clone();
         make_event_stream(Arc::clone(&self.recv)).and_then(move |(addr, msg)| {
-            let constream_ref = Arc::clone(&constream_ref);
-            let conref = Arc::clone(&conref);
+            let listref = listref.clone();
             async move {
-                let existing_lock = conref.read().await;
-                let already_exists = existing_lock.contains(&addr);
-                drop(existing_lock);
-                if !already_exists {
-                    conref.write().await.push(addr);
-                    constream_ref.send(addr).await;
-                }
+                listref.push_connection(addr).await;
                 Ok(msg)
             }
         })
@@ -193,99 +182,9 @@ impl NetworkManager {
                 }
             })
             .try_for_each(|baddr| async move {
-                let mut lock = self.connection_addrs.write().await;
-                for idx in 0..lock.len() {
-                    let matches = {
-                        let itm = lock.get(idx);
-                        itm == Some(&baddr)
-                    };
-                    if matches {
-                        lock.remove(idx);
-                        break;
-                    }
-                }
+                self.conlist.remove_connection(baddr).await;
                 DynResult::Ok(())
             })
             .await
-    }
-}
-
-pub struct SpmcRecv<T: Clone> {
-    queue: Arc<Mutex<Vec<T>>>,
-    recv: tokio::sync::watch::Receiver<()>,
-    updator: mpsc::UnboundedSender<(Arc<Mutex<Vec<T>>>, tokio::sync::watch::Sender<()>)>,
-}
-
-impl<T: Clone> SpmcRecv<T> {
-    pub async fn next(&mut self) -> Option<T> {
-        loop {
-            let mut qlock = self.queue.lock().await;
-            if !qlock.is_empty() {
-                return Some(qlock.remove(0));
-            }
-            drop(qlock);
-            self.recv.recv().await?;
-        }
-    }
-}
-
-impl<T: Clone> Clone for SpmcRecv<T> {
-    fn clone(&self) -> Self {
-        let queue = Arc::new(Mutex::new(Vec::new()));
-        let (snd, recv) = tokio::sync::watch::channel(());
-        let _cbres = self.updator.send((Arc::clone(&queue), snd));
-        SpmcRecv {
-            queue,
-            recv,
-            updator: self.updator.clone(),
-        }
-    }
-}
-
-pub struct SpmcSend<T: Clone> {
-    new_callbacks_queue:
-        Mutex<mpsc::UnboundedReceiver<(Arc<Mutex<Vec<T>>>, tokio::sync::watch::Sender<()>)>>,
-    updator: mpsc::UnboundedSender<(Arc<Mutex<Vec<T>>>, tokio::sync::watch::Sender<()>)>,
-}
-
-impl<T: Clone> SpmcSend<T> {
-    pub fn new() -> Self {
-        let (updator, raw_new_callbacks_queue) = mpsc::unbounded_channel();
-        let new_callbacks_queue = Mutex::new(raw_new_callbacks_queue);
-        Self {
-            new_callbacks_queue,
-            updator,
-        }
-    }
-    pub async fn send(&self, val: T) {
-        let mut cb_lock = self.new_callbacks_queue.lock().await;
-        let mut new_callbacks = Vec::new();
-        while let Ok((queue, signal)) = cb_lock.try_recv() {
-            let mut qlock = queue.lock().await;
-            qlock.push(val.clone());
-            drop(qlock);
-            let nxt = match signal.broadcast(()) {
-                Ok(()) => Some((queue, signal)),
-                Err(_) => None,
-            };
-            if let Some(nxt) = nxt {
-                new_callbacks.push(nxt);
-            }
-        }
-        for cb in new_callbacks.into_iter() {
-            let res = self.updator.send(cb);
-            debug_assert!(res.is_ok());
-        }
-    }
-    pub fn new_recv(&self) -> SpmcRecv<T> {
-        let queue = Arc::new(Mutex::new(Vec::new()));
-        let (snd, recv) = tokio::sync::watch::channel(());
-        let cbres = self.updator.send((Arc::clone(&queue), snd));
-        assert!(!cbres.is_err());
-        SpmcRecv {
-            queue,
-            recv,
-            updator: self.updator.clone(),
-        }
     }
 }

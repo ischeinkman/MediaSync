@@ -1,4 +1,5 @@
 use crate::messages::Message;
+use crate::network::conlist::{ConnectionEvent, ConnectionsList};
 use crate::network::friendcodes::FriendCode;
 use crate::network::publicaddr::PublicAddr;
 use crate::network::utils::random_localaddr;
@@ -12,7 +13,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::stream::{Stream, StreamMap};
-use tokio::sync::broadcast;
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 type EventStream = futures::stream::BoxStream<'static, DynResult<Message>>;
@@ -62,7 +62,7 @@ impl NetworkManager {
     fn new(listener: TcpListener) -> DynResult<Self> {
         let local_addr = listener.local_addr().unwrap();
         let public_addr = RwLock::new(None);
-        let (address_sink, _) = broadcast::channel(5);
+        let address_sink = ConnectionsList::new();
         let event_sources = Arc::new(Mutex::new(StreamMap::new()));
         let event_sinks = Arc::new(Mutex::new(Vec::new()));
         let connection_task = BackgroundTask::new(
@@ -83,8 +83,13 @@ impl NetworkManager {
     pub fn new_connections(&self) -> impl Stream<Item = DynResult<SocketAddr>> {
         self.connection_task
             .address_sink
-            .subscribe()
-            .map_err(Box::from)
+            .event_stream()
+            .filter_map(|evt| async move {
+                match evt {
+                    ConnectionEvent::Add { addr } => Some(Ok(addr)),
+                    _ => None,
+                }
+            })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -112,15 +117,13 @@ impl NetworkManager {
     }
 
     async fn add_connection(&self, con: TcpStream) -> DynResult<()> {
-        con.set_nodelay(true)?;
-        let addr = con.local_addr()?;
-        let (read, write) = tokio::io::split(con);
-        let mut sources_lock = self.event_sources.lock().await;
-        let mut sinks_lock = self.event_sinks.lock().await;
-        sources_lock.insert(addr, make_event_stream(read));
-        sinks_lock.push(write.into());
-        if let Err(_e) = self.connection_task.address_sink.send(addr) {}
-        Ok(())
+        prepare_connection(
+            con,
+            &self.connection_task.address_sink,
+            &self.event_sources,
+            &self.event_sinks,
+        )
+        .await
     }
 
     pub fn remote_event_stream(&self) -> impl Stream<Item = DynResult<Message>> {
@@ -188,14 +191,33 @@ impl Drop for NetworkManager {
     }
 }
 
+async fn prepare_connection(
+    con: TcpStream,
+    address_sink: &ConnectionsList,
+    event_sources: &EventStreamStore,
+    event_sinks: &EventSinkStore,
+) -> crate::DynResult<()> {
+    con.set_nodelay(true)?;
+    let addr = con.peer_addr()?;
+    let (read, write) = tokio::io::split(con);
+    let mut sources_lock = event_sources.lock().await;
+    let mut sinks_lock = event_sinks.lock().await;
+    sources_lock.insert(addr, make_event_stream(read));
+    sinks_lock.push(write.into());
+    drop(sources_lock);
+    drop(sinks_lock);
+    address_sink.push_connection(addr).await;
+    Ok(())
+}
+
 struct BackgroundTask {
     die_signal: Option<oneshot::Sender<()>>,
-    address_sink: broadcast::Sender<SocketAddr>,
+    address_sink: ConnectionsList,
 }
 impl BackgroundTask {
     pub fn new(
         mut listener: TcpListener,
-        address_sink: broadcast::Sender<SocketAddr>,
+        address_sink: ConnectionsList,
         event_sources: EventStreamStore,
         event_sinks: EventSinkStore,
     ) -> Self {
@@ -217,17 +239,9 @@ impl BackgroundTask {
                         break;
                     }
                 };
-                con.set_nodelay(true).unwrap();
-                let addr = con.peer_addr().unwrap();
-                log::info!("New connection from addr: {:?}", addr);
-                let (read, write) = tokio::io::split(con);
-                let mut sources_lock = event_sources.lock().await;
-                let mut sinks_lock = event_sinks.lock().await;
-                sources_lock.insert(addr, make_event_stream(read));
-                sinks_lock.push(write.into());
-                drop(sources_lock);
-                drop(sinks_lock);
-                as2.send(addr).unwrap();
+                prepare_connection(con, &as2, &event_sources, &event_sinks)
+                    .await
+                    .unwrap();
                 tokio::task::yield_now().await;
             }
         });
